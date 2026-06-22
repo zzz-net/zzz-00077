@@ -314,7 +314,7 @@ test('Doc-6.6 导出备份 + 导入恢复，同名自动加后缀', () => {
   const imported = (importRes as any).snapshot;
   assert(imported.name !== origSnap.name, '同名自动改名');
   assert(imported.name.includes('导出导入节点'), '保留原名');
-  assert(imported.name.includes('导入于'), '标记导入');
+  assert(imported.name.includes('(导入 '), '标记导入');
   assertEq(useReplayStore.getState().snapshots.length, beforeCount + 1, '数量+1');
 
   // 内容一致

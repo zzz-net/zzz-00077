@@ -396,7 +396,16 @@ test('Enhanced-导入冲突_三种策略', () => {
   assertEq(useReplayStore.getState().snapshots.length, 2, '保留两份后数量+1');
   const keepNames = useReplayStore.getState().snapshots.map(x => x.name);
   assert(keepNames.includes('冲突快照'), '保留原名');
-  assert(keepNames.some(n => n.startsWith('冲突快照') && n !== '冲突快照'), '新名自动生成');
+  const renamedSnap = keepNames.find(n => n.startsWith('冲突快照') && n !== '冲突快照')!;
+  assert(renamedSnap, '新名自动生成');
+  assert(renamedSnap.includes('(导入 '), '新名包含"导入"标记');
+  assert(/\(导入 \d{8}_\d{6}\)/.test(renamedSnap), `新名包含时间戳格式: ${renamedSnap}`);
+  assert(resultKeep.renamedMap, '返回renamedMap');
+  assertEq(resultKeep.renamedMap!['冲突快照'], renamedSnap, 'renamedMap映射正确');
+
+  const storedSnap = useReplayStore.getState().snapshots.find(s => s.name === renamedSnap);
+  assert(storedSnap, '列表中可找到重命名的快照');
+  assertEq(storedSnap!.name, renamedSnap, '列表名称与renamedMap一致');
 
   freshSession();
   useReplayStore.getState().saveSnapshot('冲突快照', '新本地版本');
@@ -726,6 +735,315 @@ test('Enhanced-主流程综合演练_完整验证', () => {
     console.log(`     - ${snap.name} (游标: ${snap.cursor}, 备注: ${snap.description || '(无)'})`);
   });
   console.log(`  📋 最终操作日志条数: ${useReplayStore.getState().snapshotLogs.length}`);
+});
+
+// ============================================================
+// 测试19：同名导入时间规则命名一致性
+// ============================================================
+test('Import-同名导入_时间规则命名_提示列表落盘一致', () => {
+  freshSession();
+
+  useReplayStore.getState().saveSnapshot('巡检点A', '本地巡检');
+  const snapId = useReplayStore.getState().snapshots[0].snapshotId;
+  const exportJson = useReplayStore.getState().exportSnapshot(snapId);
+
+  useReplayStore.getState().saveSnapshot('巡检点B', '另一个本地');
+  const snapId2 = useReplayStore.getState().snapshots[1].snapshotId;
+  const exportJson2 = useReplayStore.getState().exportSnapshot(snapId2);
+
+  freshSession();
+  useReplayStore.getState().saveSnapshot('巡检点A', '新本地');
+  useReplayStore.getState().saveSnapshot('巡检点B', '另一个新本地');
+
+  const result = useReplayStore.getState().importSnapshots(exportJson, 'keep_both');
+  assert(result.success, '导入成功');
+  assertEq(result.importedCount, 1, '导入了1个');
+  assert(result.renamedMap, '有renamedMap');
+  const newNameA = result.renamedMap!['巡检点A'];
+  assert(newNameA, '巡检点A被重命名');
+  assert(/\(导入 \d{8}_\d{6}\)/.test(newNameA), `新名符合时间格式: ${newNameA}`);
+
+  const storedA = useReplayStore.getState().snapshots.find(s => s.name === newNameA);
+  assert(storedA, '列表中存在重命名的快照');
+  assertEq(storedA!.description, '本地巡检', '描述来自导入文件');
+
+  const localStorageData = JSON.parse(localStorage.getItem('replay:snapshots') || '[]');
+  const storedInLS = localStorageData.find((s: any) => s.name === newNameA);
+  assert(storedInLS, 'localStorage中存在重命名的快照');
+  assertEq(storedInLS.name, newNameA, 'localStorage名称与返回名称一致');
+
+  const result2 = useReplayStore.getState().importSnapshots(exportJson2, 'keep_both');
+  assert(result2.success, '第二个导入成功');
+  assert(result2.renamedMap, '第二个有renamedMap');
+  const newNameB = result2.renamedMap!['巡检点B'];
+  assert(newNameB, '巡检点B被重命名');
+
+  const allNames = useReplayStore.getState().snapshots.map(s => s.name);
+  assert(allNames.includes('巡检点A'), '保留原巡检点A');
+  assert(allNames.includes('巡检点B'), '保留原巡检点B');
+  assert(allNames.includes(newNameA), '列表包含重命名A');
+  assert(allNames.includes(newNameB), '列表包含重命名B');
+
+  const uniqueNames = new Set(allNames);
+  assertEq(uniqueNames.size, allNames.length, '所有快照名称唯一');
+});
+
+// ============================================================
+// 测试20：批量导入后排序和搜索一致性
+// ============================================================
+test('Import-批量导入后_排序搜索一致', () => {
+  freshSession();
+
+  useReplayStore.getState().saveSnapshot('Alpha', '第一个');
+  useReplayStore.getState().saveSnapshot('Beta', '第二个');
+
+  const ids = useReplayStore.getState().snapshots.map(s => s.snapshotId);
+  const exportJson = useReplayStore.getState().batchExportSnapshots(ids);
+
+  freshSession();
+  useReplayStore.getState().saveSnapshot('Gamma', '第三个');
+  useReplayStore.getState().saveSnapshot('Alpha', '同名Alpha');
+
+  const result = useReplayStore.getState().importSnapshots(exportJson, 'keep_both');
+  assert(result.success, '批量导入成功');
+  assertEq(result.importedCount, 2, '导入2个');
+
+  const allSnaps = useReplayStore.getState().snapshots;
+  assertEq(allSnaps.length, 4, '总共4个');
+
+  const byNameAsc = useReplayStore.getState().sortSnapshots(allSnaps, 'name_asc');
+  for (let i = 1; i < byNameAsc.length; i++) {
+    assert(byNameAsc[i - 1].name.localeCompare(byNameAsc[i].name, 'zh-CN') <= 0, `名称升序: ${byNameAsc[i - 1].name} <= ${byNameAsc[i].name}`);
+  }
+
+  const byNewest = useReplayStore.getState().sortSnapshots(allSnaps, 'newest_first');
+  for (let i = 1; i < byNewest.length; i++) {
+    assert(byNewest[i - 1].createdAt >= byNewest[i].createdAt, '最新优先排序');
+  }
+
+  const searchAlpha = useReplayStore.getState().filterSnapshots('Alpha');
+  assert(searchAlpha.length === 2, `搜索Alpha找到2个: 实际${searchAlpha.length}`);
+  const alphaNames = searchAlpha.map(s => s.name);
+  assert(alphaNames.includes('Alpha'), '搜索结果包含原名Alpha');
+  assert(alphaNames.some(n => n.startsWith('Alpha') && n.includes('(导入')), '搜索结果包含重命名的Alpha');
+
+  const renamedName = result.renamedMap!['Alpha'];
+  const searchRenamed = useReplayStore.getState().filterSnapshots(renamedName!);
+  assert(searchRenamed.length >= 1, '按重命名全名搜索可找到');
+
+  const searchBeta = useReplayStore.getState().filterSnapshots('Beta');
+  assertEq(searchBeta.length, 1, '搜索Beta找到1个');
+
+  const searchNone = useReplayStore.getState().filterSnapshots('不存在的名字');
+  assertEq(searchNone.length, 0, '搜索不存在的返回空');
+});
+
+// ============================================================
+// 测试21：导出再导回一致性
+// ============================================================
+test('Import-导出再导回_名称内容一致', () => {
+  freshSession();
+
+  useReplayStore.getState().stepForward();
+  useReplayStore.getState().stepForward();
+  const r = useReplayStore.getState().saveSnapshot('导出测试', '导出用描述');
+  assert(r.success);
+  const originalId = r.snapshot!.snapshotId;
+
+  const exportJson = useReplayStore.getState().exportSnapshot(originalId);
+  assert(exportJson.length > 0, '导出成功');
+
+  const parsed = JSON.parse(exportJson);
+  assertEq(parsed.schemaVersion, 1);
+  assertEq(parsed.snapshot.name, '导出测试');
+  assertEq(parsed.snapshot.description, '导出用描述');
+
+  freshSession();
+  assertEq(useReplayStore.getState().snapshots.length, 0);
+
+  const importResult = useReplayStore.getState().importSnapshots(exportJson, 'keep_both');
+  assert(importResult.success, '导回成功');
+  assertEq(importResult.importedCount, 1, '导回1个');
+  assert(!importResult.renamedMap || Object.keys(importResult.renamedMap).length === 0, '无冲突无重命名');
+
+  const imported = useReplayStore.getState().snapshots[0];
+  assertEq(imported.name, '导出测试', '导回名称一致');
+  assertEq(imported.description, '导出用描述', '导回描述一致');
+  assert(imported.snapshotId !== originalId, '新ID');
+
+  const restoreOk = useReplayStore.getState().restoreSnapshot(imported.snapshotId);
+  assert(restoreOk, '导回快照可恢复');
+
+  freshSession();
+  useReplayStore.getState().saveSnapshot('导出测试', '冲突版本');
+  const conflictImport = useReplayStore.getState().importSnapshots(exportJson, 'keep_both');
+  assert(conflictImport.success, '同名导回成功');
+  assert(conflictImport.renamedMap, '同名导回有重命名');
+  const renamedName = conflictImport.renamedMap!['导出测试'];
+  assert(renamedName, '导出测试被重命名');
+  assert(renamedName.includes('导出测试'), '重命名保留原名前缀');
+  assert(renamedName.includes('(导入 '), '重命名包含导入标记');
+
+  const allSnaps = useReplayStore.getState().snapshots;
+  const byName = allSnaps.map(s => s.name);
+  assert(byName.includes('导出测试'), '保留原名');
+  assert(byName.includes(renamedName), '保留新名');
+
+  const overwrittenSnap = allSnaps.find(s => s.name === renamedName)!;
+  assertEq(overwrittenSnap.description, '导出用描述', '重命名快照的内容来自导入文件');
+});
+
+// ============================================================
+// 测试22：本地重启后重开_导入快照名称持久化
+// ============================================================
+test('Import-本地重启_导入快照名称持久化', () => {
+  freshSession();
+
+  useReplayStore.getState().saveSnapshot('持久化测试', 'v1导出');
+  const snapId = useReplayStore.getState().snapshots[0].snapshotId;
+  const exportJson = useReplayStore.getState().exportSnapshot(snapId);
+
+  freshSession();
+  useReplayStore.getState().saveSnapshot('持久化测试', 'v2本地');
+
+  const importResult = useReplayStore.getState().importSnapshots(exportJson, 'keep_both');
+  assert(importResult.success, '导入成功');
+  const renamedName = importResult.renamedMap!['持久化测试'];
+  assert(renamedName, '有重命名');
+
+  useReplayStore.getState().saveSession();
+
+  const storageBackup: Record<string, string | null> = {};
+  Object.values({
+    SESSION: 'replay:session',
+    EVENTS: 'replay:events',
+    RULES: 'replay:rules',
+    LAST_EXPORT: 'replay:lastExport',
+    SNAPSHOTS: 'replay:snapshots',
+    SNAPSHOT_LOGS: 'replay:snapshotLogs',
+  }).forEach(key => {
+    storageBackup[key] = localStorage.getItem(key);
+  });
+
+  const namesBefore = useReplayStore.getState().snapshots.map(s => s.name).sort();
+  assert(namesBefore.includes('持久化测试'), '重启前有原名');
+  assert(namesBefore.includes(renamedName), '重启前有重命名');
+
+  const origBefore = useReplayStore.getState().snapshots.find(s => s.name === '持久化测试')!;
+  assertEq(origBefore.description, 'v2本地', '重启前原名描述正确');
+  const renamedBefore = useReplayStore.getState().snapshots.find(s => s.name === renamedName)!;
+  assertEq(renamedBefore.description, 'v1导出', '重启前重命名描述正确');
+
+  freshSession();
+  assertEq(useReplayStore.getState().snapshots.length, 0, '清空后无快照');
+
+  Object.entries(storageBackup).forEach(([key, val]) => {
+    if (val !== null) localStorage.setItem(key, val);
+  });
+
+  useReplayStore.getState().loadSession();
+
+  const namesAfter = useReplayStore.getState().snapshots.map(s => s.name).sort();
+  assertEq(namesAfter.length, namesBefore.length, '重启后数量一致');
+  for (const name of namesBefore) {
+    assert(namesAfter.includes(name), `重启后保留名称: ${name}`);
+  }
+
+  const originalSnap = useReplayStore.getState().snapshots.find(s => s.name === '持久化测试');
+  assertEq(originalSnap!.description, 'v2本地', '重启后原名快照描述正确');
+
+  const renamedSnap = useReplayStore.getState().snapshots.find(s => s.name === renamedName);
+  assertEq(renamedSnap!.description, 'v1导出', '重启后重命名快照描述正确');
+
+  const restoreOk = useReplayStore.getState().restoreSnapshot(renamedSnap!.snapshotId);
+  assert(restoreOk, '重启后重命名快照可恢复');
+});
+
+// ============================================================
+// 测试23：多次同名导入_名称递增不冲突
+// ============================================================
+test('Import-多次同名导入_名称递增不冲突', () => {
+  freshSession();
+
+  useReplayStore.getState().saveSnapshot('重复快照', 'v1');
+  const snapId = useReplayStore.getState().snapshots[0].snapshotId;
+  const exportJson = useReplayStore.getState().exportSnapshot(snapId);
+
+  useReplayStore.getState().saveSnapshot('重复快照', 'v2-local');
+
+  const r1 = useReplayStore.getState().importSnapshots(exportJson, 'keep_both');
+  assert(r1.success, '第一次导入成功');
+  assert(r1.renamedMap, '第一次有重命名');
+  const name1 = r1.renamedMap!['重复快照'];
+
+  const r2 = useReplayStore.getState().importSnapshots(exportJson, 'keep_both');
+  assert(r2.success, '第二次导入成功');
+  assert(r2.renamedMap, '第二次有重命名');
+  const name2 = r2.renamedMap!['重复快照'];
+
+  assert(name1 !== name2, `两次导入新名不同: ${name1} vs ${name2}`);
+
+  const allNames = useReplayStore.getState().snapshots.map(s => s.name);
+  const uniqueNames = new Set(allNames);
+  assertEq(uniqueNames.size, allNames.length, `所有名称唯一: ${allNames.join(', ')}`);
+
+  assert(allNames.includes('重复快照'), '保留原名');
+  assert(allNames.includes(name1), '第一次导入名');
+  assert(allNames.includes(name2), '第二次导入名');
+
+  const lsData = JSON.parse(localStorage.getItem('replay:snapshots') || '[]');
+  const lsNames = lsData.map((s: any) => s.name);
+  for (const name of allNames) {
+    assert(lsNames.includes(name), `localStorage包含: ${name}`);
+  }
+});
+
+// ============================================================
+// 测试24：批量导出再批量导回_完整链路
+// ============================================================
+test('Import-批量导出再导回_完整链路', () => {
+  freshSession();
+
+  createMultipleSnapshots(3);
+  const allIds = useReplayStore.getState().snapshots.map(s => s.snapshotId);
+
+  const exportJson = useReplayStore.getState().batchExportSnapshots(allIds);
+
+  freshSession();
+  createMultipleSnapshots(3);
+
+  const check = useReplayStore.getState().checkImportConflicts(exportJson);
+  assert(check.success, '冲突检查成功');
+  assert(check.hasConflict, '检测到冲突');
+  assert(check.conflictingNames!.length === 3, '3个冲突');
+
+  const result = useReplayStore.getState().importSnapshots(exportJson, 'keep_both');
+  assert(result.success, '批量导入成功');
+  assertEq(result.importedCount, 3, '导入3个');
+  assert(result.renamedMap, '有重命名映射');
+  assertEq(Object.keys(result.renamedMap!).length, 3, '3个被重命名');
+
+  const allSnaps = useReplayStore.getState().snapshots;
+  assertEq(allSnaps.length, 6, '总共6个');
+
+  for (const [origName, newName] of Object.entries(result.renamedMap!)) {
+    const found = allSnaps.find(s => s.name === newName);
+    assert(found, `列表包含重命名: ${newName}`);
+    assert(found!.name === newName, `列表名与renamedMap一致: ${newName}`);
+
+    const lsData = JSON.parse(localStorage.getItem('replay:snapshots') || '[]');
+    const lsFound = lsData.find((s: any) => s.name === newName);
+    assert(lsFound, `localStorage包含: ${newName}`);
+    assertEq(lsFound.name, newName, `localStorage名与renamedMap一致: ${newName}`);
+  }
+
+  const search1 = useReplayStore.getState().filterSnapshots('测试快照');
+  assertEq(search1.length, 6, '搜索原名前缀找到所有6个');
+
+  const sorted = useReplayStore.getState().sortSnapshots(allSnaps, 'name_asc');
+  for (let i = 1; i < sorted.length; i++) {
+    assert(sorted[i - 1].name.localeCompare(sorted[i].name, 'zh-CN') <= 0);
+  }
 });
 
 // ============================================================

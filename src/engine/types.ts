@@ -128,6 +128,7 @@ export interface ImportResult {
   conflictingNames?: string[];
   importedCount?: number;
   skippedCount?: number;
+  renamedMap?: Record<string, string>;
 }
 
 export interface ExportedSnapshotBatch {

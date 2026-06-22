@@ -1221,7 +1221,19 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       const existingSnapshots = [...state.snapshots];
       const existingNames = new Map(existingSnapshots.map(s => [s.name, s]));
       const importedSnapshots: Snapshot[] = [];
+      const renamedMap: Record<string, string> = {};
       let skippedCount = 0;
+
+      const generateTimeSuffix = (): string => {
+        const now = new Date();
+        const y = now.getFullYear();
+        const mo = String(now.getMonth() + 1).padStart(2, '0');
+        const d = String(now.getDate()).padStart(2, '0');
+        const h = String(now.getHours()).padStart(2, '0');
+        const mi = String(now.getMinutes()).padStart(2, '0');
+        const sec = String(now.getSeconds()).padStart(2, '0');
+        return `${y}${mo}${d}_${h}${mi}${sec}`;
+      };
 
       for (const rawSnap of checkResult.snapshotsToImport || []) {
         let snap: Snapshot = {
@@ -1241,12 +1253,16 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
             importedSnapshots.push(existingSnapshots[idx]);
             existingNames.set(snap.name, existingSnapshots[idx]);
           } else if (conflictStrategy === 'keep_both') {
-            let counter = 1;
-            let newName = `${snap.name} (导入${counter})`;
-            while (existingNames.has(newName)) {
-              counter++;
-              newName = `${snap.name} (导入${counter})`;
+            const timeSuffix = generateTimeSuffix();
+            let newName = `${snap.name} (导入 ${timeSuffix})`;
+            if (existingNames.has(newName)) {
+              let counter = 2;
+              while (existingNames.has(`${snap.name} (导入 ${timeSuffix}_${counter})`)) {
+                counter++;
+              }
+              newName = `${snap.name} (导入 ${timeSuffix}_${counter})`;
             }
+            renamedMap[snap.name] = newName;
             snap = { ...snap, name: newName };
             existingSnapshots.push(snap);
             importedSnapshots.push(snap);
@@ -1284,6 +1300,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         skippedCount,
         hasConflict: checkResult.hasConflict,
         conflictingNames: checkResult.conflictingNames,
+        renamedMap: Object.keys(renamedMap).length > 0 ? renamedMap : undefined,
       };
     },
 

@@ -335,7 +335,7 @@ test('HO-05 主流程串联：§6.1→6.2→6.3取消→6.3覆盖→6.4恢复→
   assert((ex as any).filename.startsWith('snapshot-流程节点2-'), '文件名格式正确');
   const beforeImport = snap().snapLen;
   const im = ui_import((ex as any).json);
-  contains(im.text, '已导入快照 "流程节点2 (导入于 ', '§6.6导入 Toast 正确（同名自动加后缀）');
+  contains(im.text, '已导入快照 "流程节点2 (导入 ', '§6.6导入 Toast 正确（同名自动加后缀）');
   assertEq(snap().snapLen, beforeImport + 1, '§6.6列表数量+1');
 
   // §6.7 刷新保留

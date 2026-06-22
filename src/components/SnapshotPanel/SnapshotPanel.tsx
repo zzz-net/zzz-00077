@@ -137,9 +137,19 @@ function ImportConflictDialog({ conflictingNames, onOverwrite, onKeepBoth, onCan
               ))}
             </ul>
           </div>
-          <p className="text-xs text-slate-400 flex items-start gap-1.5">
+          <div className="space-y-1.5">
+            <p className="text-xs text-slate-300 flex items-start gap-1.5">
+              <span className="text-blue-400 flex-shrink-0 mt-0.5">●</span>
+              选择「保留两份」— 保留本地原名，导入的快照自动重命名为 <span className="font-mono text-blue-300">"原名 (导入 YYYYMMDD_HHmmss)"</span>
+            </p>
+            <p className="text-xs text-slate-300 flex items-start gap-1.5">
+              <span className="text-orange-400 flex-shrink-0 mt-0.5">●</span>
+              选择「覆盖同名」— 用导入文件替换本地同名快照的全部内容
+            </p>
+          </div>
+          <p className="text-xs text-yellow-500/80 flex items-start gap-1.5">
             <AlertOctagon className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-            选择「覆盖」将用导入文件替换本地同名快照；选择「保留两份」将自动对导入的快照重命名。
+            覆盖后原快照内容将被替换且不可恢复。
           </p>
         </div>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-slate-700 bg-slate-900/40">
@@ -779,8 +789,8 @@ export function SnapshotPanel() {
       } else {
         const result = importSnapshots(content, 'keep_both');
         if (result.success) {
-          const total = result.importedCount || 1;
-          showToast('success', `成功导入 ${total} 个快照`);
+          const names = (result.snapshots || []).map(s => s.name);
+          showToast('success', `成功导入 ${names.length} 个快照：${names.join('、')}`);
         } else {
           showToast('error', `导入失败：${result.error || '未知错误'}`);
         }
@@ -796,8 +806,8 @@ export function SnapshotPanel() {
     if (!pendingImportData) return;
     const result = importSnapshots(pendingImportData.json, 'overwrite');
     if (result.success) {
-      const total = result.importedCount || 1;
-      showToast('success', `已覆盖导入 ${total} 个快照`);
+      const names = (result.snapshots || []).map(s => s.name);
+      showToast('success', `已覆盖导入 ${names.length} 个快照：${names.join('、')}`);
     } else {
       showToast('error', `导入失败：${result.error || '未知错误'}`);
     }
@@ -808,8 +818,15 @@ export function SnapshotPanel() {
     if (!pendingImportData) return;
     const result = importSnapshots(pendingImportData.json, 'keep_both');
     if (result.success) {
-      const total = result.importedCount || 1;
-      showToast('success', `成功导入 ${total} 个快照（重名已自动改名）`);
+      const names = (result.snapshots || []).map(s => s.name);
+      const renamed = result.renamedMap || {};
+      const renamedEntries = Object.entries(renamed);
+      if (renamedEntries.length > 0) {
+        const detail = renamedEntries.map(([orig, newName]) => `${orig} → ${newName}`).join('；');
+        showToast('success', `成功导入 ${names.length} 个快照（重命名：${detail}）`);
+      } else {
+        showToast('success', `成功导入 ${names.length} 个快照：${names.join('、')}`);
+      }
     } else {
       showToast('error', `导入失败：${result.error || '未知错误'}`);
     }
