@@ -46,7 +46,7 @@ export class EventProcessor {
         return {
           status: 'normal',
           updatedAlarms,
-          markedEvent,
+          markedEvent: { ...markedEvent, status: 'normal' },
           message: '清除事件匹配到缓存的告警',
         };
       }
@@ -56,7 +56,7 @@ export class EventProcessor {
       return {
         status: 'normal',
         updatedAlarms,
-        markedEvent,
+        markedEvent: { ...markedEvent, status: 'normal' },
         alarm: clearedAlarm,
         message: clearedAlarm ? '告警已清除' : undefined,
       };
@@ -86,7 +86,7 @@ export class EventProcessor {
       return {
         status: 'normal',
         updatedAlarms: alarm ? [...activeAlarms, alarm] : activeAlarms,
-        markedEvent: matchResult.updatedEvent,
+        markedEvent: { ...matchResult.updatedEvent, status: 'normal' },
         alarm,
         message: alarm ? '新告警生成' : undefined,
       };
@@ -97,7 +97,7 @@ export class EventProcessor {
       return {
         status: 'normal',
         updatedAlarms: activeAlarms,
-        markedEvent,
+        markedEvent: { ...markedEvent, status: 'normal' },
       };
     }
 
@@ -105,7 +105,7 @@ export class EventProcessor {
     return {
       status: 'normal',
       updatedAlarms: activeAlarms,
-      markedEvent,
+      markedEvent: { ...markedEvent, status: 'normal' },
     };
   }
 

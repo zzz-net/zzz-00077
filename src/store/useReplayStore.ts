@@ -398,15 +398,12 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
     exportTimeline: (includeState = true): string => {
       const state = get();
       
-      const processedEventMap = new Map<string, Event>();
-      state.processedEvents.forEach(e => processedEventMap.set(e.eventId, e));
-      
-      const eventsWithStatus: Event[] = state.events.map(event => {
-        const processed = processedEventMap.get(event.eventId);
+      const eventsWithStatus: Event[] = state.events.map((event, index) => {
+        const processed = state.processedEvents[index];
         if (processed && processed.status) {
           return { ...event, status: processed.status };
         }
-        return event;
+        return { ...event, status: 'normal' };
       });
       
       const exportData: ExportedTimeline = {

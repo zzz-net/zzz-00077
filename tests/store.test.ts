@@ -247,6 +247,68 @@ test('Store-会话加载后游标/确认/备注/导出一致', () => {
 });
 
 // ============================================================
+// 测试5：完整回放后导出 — 每条事件都有status，逐条校验
+// ============================================================
+test('Store-完整回放导出逐条事件状态齐全', () => {
+  const s = useReplayStore.getState();
+  s.clearSession();
+  s.loadSampleEvents();
+
+  const total = useReplayStore.getState().events.length;
+  for (let i = 0; i < total; i++) s.stepForward();
+
+  const expStr = s.exportTimeline(true);
+  const exp = JSON.parse(expStr);
+
+  assertEq(exp.events.length, total, `事件数=${exp.events.length}`);
+
+  const validStatuses = ['normal', 'duplicate', 'pending', 'matched_early_clear', 'orphan_clear'];
+  for (let i = 0; i < exp.events.length; i++) {
+    const ev = exp.events[i];
+    assert(
+      ev.status && validStatuses.includes(ev.status),
+      `事件[${i}] ${ev.eventId} 的 status="${ev.status ?? '(无)'}" 不合法，期望是 ${validStatuses.join('/')}`,
+    );
+  }
+});
+
+// ============================================================
+// 测试6：重复 eventId — 首条保留正常状态，仅后续标 duplicate
+// ============================================================
+test('Store-重复eventId首条保留正常状态后续标duplicate', () => {
+  const s = useReplayStore.getState();
+  s.clearSession();
+  s.loadSampleEvents();
+
+  const total = useReplayStore.getState().events.length;
+  for (let i = 0; i < total; i++) s.stepForward();
+
+  const expStr = s.exportTimeline(true);
+  const exp = JSON.parse(expStr);
+
+  const evt002Entries = exp.events.filter((e: any) => e.eventId === 'evt-002');
+  assertEq(evt002Entries.length, 2, 'evt-002 应出现2次');
+
+  assertEq(evt002Entries[0].status, 'normal', 'evt-002 首次出现应保留 normal 状态');
+  assertEq(evt002Entries[1].status, 'duplicate', 'evt-002 第二次出现应为 duplicate');
+
+  const evt006 = exp.events.find((e: any) => e.eventId === 'evt-006');
+  assert(evt006, 'evt-006 存在');
+  assertEq(evt006.status, 'pending', 'evt-006(早到clear)应为 pending');
+
+  const evt007 = exp.events.find((e: any) => e.eventId === 'evt-007');
+  assert(evt007, 'evt-007 存在');
+  assertEq(evt007.status, 'matched_early_clear', 'evt-007(alert匹配早到clear)应为 matched_early_clear');
+
+  const normalIds = ['evt-001', 'evt-003', 'evt-004', 'evt-008', 'evt-009', 'evt-010', 'evt-011', 'evt-012', 'evt-013', 'evt-014', 'evt-015'];
+  for (const eid of normalIds) {
+    const ev = exp.events.find((e: any) => e.eventId === eid);
+    assert(ev, `${eid} 存在`);
+    assertEq(ev.status, 'normal', `${eid} 应为 normal`);
+  }
+});
+
+// ============================================================
 // 汇总
 // ============================================================
 console.log('\n========================================');
