@@ -6,11 +6,13 @@ import { AlarmPanel } from '@/components/AlarmPanel/AlarmPanel';
 import { InputQueue } from '@/components/InputQueue/InputQueue';
 import { HistoryPanel } from '@/components/HistoryPanel/HistoryPanel';
 import { RuleEditor } from '@/components/RuleEditor/RuleEditor';
-import { AlertTriangle, Activity, Database, RefreshCw } from 'lucide-react';
+import { SnapshotPanel } from '@/components/SnapshotPanel/SnapshotPanel';
+import { AlertTriangle, Activity, Database, RefreshCw, Camera, History } from 'lucide-react';
 
 export default function Home() {
-  const { loadSession, loadSampleEvents, cursor, rules, activeAlarms, pendingEvents } = useReplayStore();
+  const { loadSession, loadSampleEvents, cursor, rules, activeAlarms, pendingEvents, snapshots, confirmations } = useReplayStore();
   const [activeTab, setActiveTab] = useState<'alarms' | 'rules'>('alarms');
+  const [rightTab, setRightTab] = useState<'history' | 'snapshots'>('history');
   const [hasSession, setHasSession] = useState(false);
 
   useEffect(() => {
@@ -113,8 +115,38 @@ export default function Home() {
           </div>
 
           <div className="col-span-4 flex flex-col gap-4">
+            <div className="flex items-center gap-1 bg-slate-900 border border-slate-700 rounded-lg p-1">
+              <button
+                onClick={() => setRightTab('history')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs rounded-md transition-colors ${
+                  rightTab === 'history'
+                    ? 'bg-slate-700 text-white font-medium'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                }`}
+              >
+                <History className="w-3.5 h-3.5" />
+                确认历史
+                <span className={`px-1.5 py-0.5 text-[10px] rounded ${rightTab === 'history' ? 'bg-slate-600' : 'bg-slate-800'} text-slate-300`}>
+                  {confirmations.length}
+                </span>
+              </button>
+              <button
+                onClick={() => setRightTab('snapshots')}
+                className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs rounded-md transition-colors ${
+                  rightTab === 'snapshots'
+                    ? 'bg-purple-600 text-white font-medium'
+                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+                }`}
+              >
+                <Camera className="w-3.5 h-3.5" />
+                场景快照
+                <span className={`px-1.5 py-0.5 text-[10px] rounded ${rightTab === 'snapshots' ? 'bg-purple-500' : 'bg-slate-800'} text-slate-200`}>
+                  {snapshots.length}
+                </span>
+              </button>
+            </div>
             <div className="flex-1 min-h-0">
-              <HistoryPanel />
+              {rightTab === 'history' ? <HistoryPanel /> : <SnapshotPanel />}
             </div>
           </div>
         </div>
