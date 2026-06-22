@@ -286,7 +286,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         alarmId,
         operator: state.operator,
         remark: remark || '已确认',
-        timestamp: Date.now(),
+        timestamp: state.cursor,
         type: 'confirm',
         active: true,
       };
@@ -324,7 +324,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         alarmId: confirmation.alarmId,
         operator: state.operator,
         remark: `撤销确认: ${confirmation.remark}`,
-        timestamp: Date.now(),
+        timestamp: state.cursor,
         type: 'undo',
         active: true,
       };
@@ -397,9 +397,22 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
 
     exportTimeline: (includeState = true): string => {
       const state = get();
+      
+      const processedEventMap = new Map<string, Event>();
+      state.processedEvents.forEach(e => processedEventMap.set(e.eventId, e));
+      
+      const eventsWithStatus: Event[] = state.events.map(event => {
+        const processed = processedEventMap.get(event.eventId);
+        if (processed && processed.status) {
+          return { ...event, status: processed.status };
+        }
+        return event;
+      });
+      
       const exportData: ExportedTimeline = {
         exportTime: Date.now(),
-        events: state.events,
+        replayCursor: state.cursor,
+        events: eventsWithStatus,
         alarms: state.activeAlarms,
         confirmations: state.confirmations,
         includeState,
@@ -408,6 +421,8 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       if (includeState) {
         exportData.cursorPosition = state.cursor;
         exportData.ruleVersion = state.rules.length > 0 ? state.rules[0].version : 'v1.0';
+        exportData.operator = state.operator;
+        exportData.operatorNotes = state.operatorNotes;
       }
       
       const json = JSON.stringify(exportData, null, 2);

@@ -84,10 +84,13 @@ export interface ReplayState {
 
 export interface ExportedTimeline {
   exportTime: number;
+  replayCursor: number;
   events: Event[];
   alarms: Alarm[];
   confirmations: Confirmation[];
   includeState: boolean;
   cursorPosition?: number;
   ruleVersion?: string;
+  operator?: string;
+  operatorNotes?: string;
 }

@@ -137,6 +137,9 @@ export function importEvents(jsonString: string): Event[] {
       throw new Error('事件数据必须是数组格式');
     }
     
+    const seenEventIds: Set<string> = new Set();
+    const duplicateIds: string[] = [];
+    
     const events: Event[] = parsed.map((item: unknown, index: number) => {
       const event = item as Partial<Event>;
       if (!event.eventId) {
@@ -148,6 +151,12 @@ export function importEvents(jsonString: string): Event[] {
       if (!['alert', 'clear', 'info'].includes(event.type || '')) {
         throw new Error(`事件 ${event.eventId} 的 type 必须是 alert/clear/info`);
       }
+      
+      if (seenEventIds.has(event.eventId)) {
+        duplicateIds.push(event.eventId);
+      }
+      seenEventIds.add(event.eventId);
+      
       return {
         eventId: event.eventId,
         timestamp: event.timestamp,
@@ -159,8 +168,18 @@ export function importEvents(jsonString: string): Event[] {
       };
     });
     
+    if (duplicateIds.length > 0) {
+      const uniqueDuplicates = Array.from(new Set(duplicateIds));
+      const preview = uniqueDuplicates.slice(0, 5).join('、');
+      const more = uniqueDuplicates.length > 5 ? `等${uniqueDuplicates.length}个` : '';
+      throw new Error(`发现重复的 eventId：${preview}${more}。导入已被拒绝，当前回放未受影响`);
+    }
+    
     return events.sort((a, b) => a.timestamp - b.timestamp);
   } catch (e) {
+    if ((e as Error).message.startsWith('发现重复的')) {
+      throw e;
+    }
     throw new Error(`事件导入失败: ${(e as Error).message}`);
   }
 }
