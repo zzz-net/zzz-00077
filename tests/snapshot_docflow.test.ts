@@ -111,10 +111,54 @@ function ui_export(snapId: string) {
   return json && snap ? { kind: 'download', json, filename: `snapshot-${snap.name}-${Date.now()}.json` } : { kind: 'toast-error', msg: '导出失败' };
 }
 
-function ui_import(json: string) {
+type ImportStrategy = 'keep_both' | 'overwrite' | 'auto';
+
+function ui_import(json: string, strategy: ImportStrategy = 'auto') {
   const store = useReplayStore.getState();
-  const r = store.importSnapshot(json);
-  return r.success && r.snapshot ? { kind: 'toast-success', msg: `已导入快照 "${r.snapshot.name}"`, snapshot: r.snapshot } : { kind: 'toast-error', msg: `导入失败：${r.error || '未知错误'}` };
+  const check = store.checkImportConflicts(json);
+  if (!check.success) {
+    return { kind: 'toast-error', msg: `导入失败：${check.error || '未知错误'}` };
+  }
+  if (check.hasConflict && check.conflictingNames && strategy === 'auto') {
+    return {
+      kind: 'show-import-conflict-dialog',
+      conflictingNames: check.conflictingNames,
+      pendingJson: json,
+    };
+  }
+  const actualStrategy = strategy === 'auto' ? 'keep_both' : strategy;
+  const r = store.importSnapshots(json, actualStrategy);
+  if (!r.success) {
+    return { kind: 'toast-error', msg: `导入失败：${r.error || '未知错误'}` };
+  }
+  const names = (r.snapshots || []).map(s => s.name);
+  let msg = '';
+  if (actualStrategy === 'overwrite') {
+    const overwritten = r.overwrittenNames || [];
+    if (overwritten.length > 0) {
+      msg = `导入完成：已覆盖 ${overwritten.length} 个同名快照（${overwritten.join('、')}），共导入 ${names.length} 个`;
+    } else {
+      msg = `成功导入 ${names.length} 个快照：${names.join('、')}`;
+    }
+  } else {
+    const renamed = r.renamedMap || {};
+    const renamedEntries = Object.entries(renamed);
+    if (renamedEntries.length > 0) {
+      const detail = renamedEntries.map(([orig, newName]) => `"${orig}" 改名为 "${newName}"`).join('；');
+      msg = `导入完成（保留两份）：共 ${names.length} 个，其中 ${renamedEntries.length} 个同名已重命名 — ${detail}`;
+    } else {
+      msg = `成功导入 ${names.length} 个快照：${names.join('、')}`;
+    }
+  }
+  return {
+    kind: 'toast-success',
+    msg,
+    snapshots: r.snapshots,
+    snapshot: r.snapshot,
+    renamedMap: r.renamedMap,
+    overwrittenNames: r.overwrittenNames,
+    importedCount: r.importedCount,
+  };
 }
 
 function ui_delete(snapId: string, userConfirm: boolean) {
@@ -308,14 +352,30 @@ test('Doc-6.6 导出备份 + 导入恢复，同名自动加后缀', () => {
 
   // 按说明：点导入（选刚才的文件）
   const beforeCount = useReplayStore.getState().snapshots.length;
-  const importRes = ui_import(json);
+  // 由于同名冲突，auto 策略会先弹冲突对话框
+  const conflictRes = ui_import(json, 'auto');
+  assertEq(conflictRes.kind, 'show-import-conflict-dialog', '同名触发冲突对话框');
+  assert((conflictRes as any).conflictingNames.includes('导出导入节点'), '冲突列表包含原名称');
+
+  // 选择「保留两份」继续导入
+  const importRes = ui_import(json, 'keep_both');
   assertEq(importRes.kind, 'toast-success', '导入成功');
-  assert(importRes.msg.includes('已导入快照'), '提示已导入');
+  assert(importRes.msg.includes('保留两份'), '提示含"保留两份"');
+  assert(importRes.msg.includes('改名为'), '提示含重命名详情');
   const imported = (importRes as any).snapshot;
   assert(imported.name !== origSnap.name, '同名自动改名');
   assert(imported.name.includes('导出导入节点'), '保留原名');
   assert(imported.name.includes('(导入 '), '标记导入');
+  // 新格式：YYYYMMDD_HHmmss_SSS (含毫秒)
+  assert(/\(导入 \d{8}_\d{6}_\d{3}\)/.test(imported.name) || /\(导入 \d{8}_\d{6}\)/.test(imported.name), '导入时间戳格式正确');
   assertEq(useReplayStore.getState().snapshots.length, beforeCount + 1, '数量+1');
+
+  // 验证 renamedMap 一致性：提示文案、列表、落盘名称三者一致
+  const renamedMap = (importRes as any).renamedMap || {};
+  assertEq(renamedMap['导出导入节点'], imported.name, 'renamedMap 中记录的新名称与实际落盘一致');
+  assert(importRes.msg.includes(imported.name), '成功提示中的新名称与实际落盘一致');
+  const inList = useReplayStore.getState().snapshots.find(s => s.snapshotId === imported.snapshotId);
+  assertEq(inList?.name, imported.name, '列表展示的名称与实际落盘一致');
 
   // 内容一致
   assertEq(imported.cursor, origSnap.cursor, '游标一致');
@@ -471,7 +531,13 @@ test('Doc-完整流程 按README顺序：新建->同名取消->同名覆盖->恢
 
   // 6.6 导入
   const before = useReplayStore.getState().snapshots.length;
-  ui_import((ex as any).json);
+  // 同名冲突：先弹对话框，再选择保留两份
+  const conflictCheck = ui_import((ex as any).json, 'auto');
+  if (conflictCheck.kind === 'show-import-conflict-dialog') {
+    ui_import((ex as any).json, 'keep_both');
+  } else {
+    // 无冲突，直接导入
+  }
   assertEq(useReplayStore.getState().snapshots.length, before + 1, '导入后+1');
 
   // 6.7 刷新保留
@@ -491,6 +557,346 @@ test('Doc-完整流程 按README顺序：新建->同名取消->同名覆盖->恢
   final.snapshots.forEach(snap => {
     console.log(`     - ${snap.name} (cursor=${snap.cursor}, desc=${snap.description || '(无)'})`);
   });
+});
+
+// ============================================================
+// 新增链路测试 - 覆盖原条目导入
+// ============================================================
+test('链路-同名导入：选择覆盖原条目，ID不变内容更新', () => {
+  const s = useReplayStore.getState();
+  s.clearSession();
+  s.loadSampleEvents();
+
+  for (let i = 0; i < 3; i++) s.stepForward();
+  const r1 = ui_save('覆盖测试', '原始内容，游标3');
+  assertEq(r1.kind, 'toast-success');
+  const origId = (r1 as any).snapshot.snapshotId;
+  const origCursor = (r1 as any).snapshot.cursor;
+
+  for (let i = 0; i < 5; i++) s.stepForward();
+  const newCursor = useReplayStore.getState().cursor;
+  assert(newCursor > origCursor, '游标已推进');
+
+  const json = s.exportSnapshot(origId);
+  const exportedData = JSON.parse(json);
+  exportedData.snapshot.cursor = newCursor;
+  exportedData.snapshot.currentEventIndex = useReplayStore.getState().currentEventIndex;
+  exportedData.snapshot.description = '覆盖后的新描述';
+  const modifiedJson = JSON.stringify(exportedData);
+
+  const conflictRes = ui_import(modifiedJson, 'auto');
+  assertEq(conflictRes.kind, 'show-import-conflict-dialog');
+
+  const importRes = ui_import(modifiedJson, 'overwrite');
+  assertEq(importRes.kind, 'toast-success');
+  assert(importRes.msg.includes('已覆盖'), '提示含"已覆盖"');
+  assert((importRes as any).overwrittenNames?.includes('覆盖测试'), 'overwrittenNames 记录正确');
+
+  const after = useReplayStore.getState().snapshots;
+  assertEq(after.length, 1, '数量不变');
+  assertEq(after[0].snapshotId, origId, 'ID保持不变');
+  assertEq(after[0].cursor, newCursor, '游标已更新为导入内容');
+  assertEq(after[0].description, '覆盖后的新描述', '描述已更新');
+
+  const logs = useReplayStore.getState().snapshotLogs;
+  const importLog = [...logs].reverse().find(l => l.action === 'import');
+  assert(importLog, '有导入操作日志');
+  assert(importLog!.detail?.includes('覆盖模式'), '日志记录覆盖模式');
+  assert(importLog!.detail?.includes('覆盖:覆盖测试'), '日志记录了被覆盖的名称');
+});
+
+// ============================================================
+// 新增链路测试 - 导出后再导回（循环一致性）
+// ============================================================
+test('链路-导出后再导回：往返内容完整一致', () => {
+  const s = useReplayStore.getState();
+  s.clearSession();
+  s.loadSampleEvents();
+
+  for (let i = 0; i < 4; i++) s.stepForward();
+  const alarm = s.activeAlarms.find(a => a.status === 'active');
+  if (alarm) s.confirmAlarm(alarm.alarmId, '往返测试确认');
+  s.setOperatorNotes('往返测试备注');
+  const r = ui_save('往返节点', '导出再导回验证');
+  assertEq(r.kind, 'toast-success');
+  const origSnap = (r as any).snapshot;
+
+  const json1 = s.exportSnapshot(origSnap.snapshotId);
+  // 先导入一次（改名）
+  const imp1 = ui_import(json1, 'keep_both');
+  assertEq(imp1.kind, 'toast-success');
+  const snap1 = (imp1 as any).snapshot;
+
+  // 再把改名后的导出来
+  const json2 = s.exportSnapshot(snap1.snapshotId);
+  // 再导入一次（又一次改名）
+  const imp2 = ui_import(json2, 'keep_both');
+  assertEq(imp2.kind, 'toast-success');
+  const snap2 = (imp2 as any).snapshot;
+
+  // 验证三次内容完全一致（除snapshotId、name、createdAt外）
+  const stripped = (o: any) => {
+    const c = { ...o };
+    delete c.snapshotId;
+    delete c.name;
+    delete c.createdAt;
+    return JSON.stringify(c);
+  };
+  assertEq(stripped(snap2), stripped(origSnap), '两次导回后内容与原始一致');
+  assertEq(snap2.cursor, origSnap.cursor, '游标一致');
+  assertEq(snap2.confirmations.length, origSnap.confirmations.length, '确认数一致');
+  assertEq(snap2.operatorNotes, origSnap.operatorNotes, '备注一致');
+  assertEq(snap2.events.length, origSnap.events.length, '事件数一致');
+
+  // 列表数量：原始 + 两次导入 = 3
+  assertEq(useReplayStore.getState().snapshots.length, 3, '共3条快照');
+});
+
+// ============================================================
+// 新增链路测试 - 批量导入混合同名冲突
+// ============================================================
+test('链路-批量导入混合同名冲突：部分同名+部分新名称', () => {
+  const s = useReplayStore.getState();
+  s.clearSession();
+  s.loadSampleEvents();
+
+  for (let i = 0; i < 2; i++) s.stepForward();
+  ui_save('同名A', '本地版本');
+  const localCursorA = s.cursor;
+  for (let i = 0; i < 2; i++) s.stepForward();
+  ui_save('同名B', '本地版本');
+  const localCursorB = s.cursor;
+
+  // 直接构造批量导入数据，不通过 store，避免触发同名冲突
+
+  const batchData = {
+    schemaVersion: 1,
+    exportTime: Date.now(),
+    exportedBy: '测试员',
+    count: 3,
+    snapshots: [],
+  };
+
+  for (let i = 0; i < 3; i++) s.stepForward();
+  const importCursorA = s.cursor;
+  for (let i = 0; i < 2; i++) s.stepForward();
+  const importCursorB = s.cursor;
+  for (let i = 0; i < 2; i++) s.stepForward();
+  const importCursorC = s.cursor;
+
+  // 直接构造3个snapshot对象
+  const baseSnap: any = (snapName: string, desc: string, cursor: number) => ({
+    snapshotId: 'batch-import-' + snapName,
+    name: snapName,
+    description: desc,
+    createdAt: Date.now() + Math.random(),
+    cursor,
+    currentEventIndex: s.currentEventIndex,
+    events: JSON.parse(JSON.stringify(s.events)),
+    activeAlarms: JSON.parse(JSON.stringify(s.activeAlarms)),
+    processedEvents: JSON.parse(JSON.stringify(s.processedEvents)),
+    pendingEvents: JSON.parse(JSON.stringify(s.pendingEvents)),
+    confirmations: JSON.parse(JSON.stringify(s.confirmations)),
+    rules: JSON.parse(JSON.stringify(s.rules)),
+    operator: s.operator,
+    operatorNotes: s.operatorNotes,
+    startTime: s.startTime,
+    endTime: s.endTime,
+  });
+
+  batchData.snapshots.push(baseSnap('同名A', '导入版本A', importCursorA));
+  batchData.snapshots.push(baseSnap('同名B', '导入版本B', importCursorB));
+  batchData.snapshots.push(baseSnap('新名称C', '导入版本C', importCursorC));
+
+  const batchJson = JSON.stringify(batchData);
+
+  // 保留两份模式
+  const keepRes = ui_import(batchJson, 'keep_both');
+  assertEq(keepRes.kind, 'toast-success');
+  assertEq((keepRes as any).importedCount, 3, '导入3个');
+  const renamed = (keepRes as any).renamedMap || {};
+  assert(renamed['同名A'], '同名A被重命名');
+  assert(renamed['同名B'], '同名B被重命名');
+  assert(!renamed['新名称C'], '新名称C未被重命名');
+
+  const allSnaps = useReplayStore.getState().snapshots;
+  assertEq(allSnaps.length, 5, '本地2 + 导入3 = 5条');
+
+  // 同名A 应该有 2 条（本地 + 导入改名）
+  const aCount = allSnaps.filter(x => x.name.includes('同名A')).length;
+  assertEq(aCount, 2, '同名A出现2次');
+  const cCount = allSnaps.filter(x => x.name === '新名称C').length;
+  assertEq(cCount, 1, '新名称C只有1次（未改名）');
+
+  // 验证操作日志
+  const logs = useReplayStore.getState().snapshotLogs;
+  const impLog = [...logs].reverse().find(l => l.action === 'import');
+  assert(impLog!.snapshotNames.length === 3, '日志记录3个导入快照名');
+  assert(impLog!.detail?.includes('保留两份模式'), '日志记录保留两份模式');
+  assert(impLog!.detail?.includes('同名A→'), '日志记录同名A的重命名');
+  assert(impLog!.detail?.includes('同名B→'), '日志记录同名B的重命名');
+
+  // 搜索验证：能搜到改名后的导入快照
+  const store = useReplayStore.getState();
+  const searchA = store.filterSnapshots('同名A');
+  assertEq(searchA.length, 2, '搜索"同名A"返回2条（本地+导入）');
+  // 精确搜名称中的导入后缀 "(导入"，避免搜到描述里的"导入版本"
+  const searchByName = store.snapshots.filter(s => s.name.includes('(导入'));
+  assertEq(searchByName.length, 2, '按名称搜"(导入"返回2条（只有重命名的A和B）');
+  // 直接比对：A和B都被重命名了，C没有
+  const hasImportA = store.snapshots.some(s => s.name.startsWith('同名A') && s.name.includes('导入'));
+  const hasImportB = store.snapshots.some(s => s.name.startsWith('同名B') && s.name.includes('导入'));
+  const hasImportC = store.snapshots.some(s => s.name === '新名称C' && s.name.includes('导入'));
+  assert(hasImportA, 'A有导入后缀版本');
+  assert(hasImportB, 'B有导入后缀版本');
+  assert(!hasImportC, 'C没有导入后缀版本');
+});
+
+// ============================================================
+// 新增链路测试 - 本地重启后重新打开
+// ============================================================
+test('链路-本地重启后：导入的快照和操作日志均完整保留', () => {
+  const s = useReplayStore.getState();
+  s.clearSession();
+  s.loadSampleEvents();
+
+  for (let i = 0; i < 3; i++) s.stepForward();
+  const orig = ui_save('重启测试', '原始快照');
+  const origSnap = (orig as any).snapshot;
+
+  const json = s.exportSnapshot(origSnap.snapshotId);
+  const imp = ui_import(json, 'keep_both');
+  assertEq(imp.kind, 'toast-success');
+  const importedSnap = (imp as any).snapshot;
+  const importedName = importedSnap.name;
+
+  // 模拟刷新
+  s.saveSession();
+  const snapBefore = useReplayStore.getState().snapshots.length;
+  const logBefore = useReplayStore.getState().snapshotLogs.length;
+
+  const backup: Record<string, string | null> = {};
+  ['replay:session', 'replay:events', 'replay:rules', 'replay:lastExport', 'replay:snapshots', 'replay:snapshotLogs'].forEach(k => {
+    backup[k] = localStorage.getItem(k);
+  });
+  s.clearSession();
+  Object.entries(backup).forEach(([k, v]) => { if (v !== null) localStorage.setItem(k, v); });
+  s.loadSession();
+
+  // 重启后验证
+  assertEq(useReplayStore.getState().snapshots.length, snapBefore, '重启后快照数量一致');
+  const afterImported = useReplayStore.getState().snapshots.find(x => x.name === importedName);
+  assert(!!afterImported, `重启后导入的快照"${importedName}"仍在`);
+  assertEq(afterImported!.cursor, importedSnap.cursor, '重启后导入的快照游标正确');
+  assertEq(afterImported!.description, importedSnap.description, '重启后描述正确');
+
+  // 操作日志也保留
+  assert(useReplayStore.getState().snapshotLogs.length >= logBefore, '重启后操作日志不减少');
+  const hasImportLog = useReplayStore.getState().snapshotLogs.some(
+    l => l.action === 'import' && l.snapshotNames.includes(importedName),
+  );
+  assert(hasImportLog, '重启后仍可追溯到导入操作日志');
+
+  // 排序验证：导入的快照正确参与排序
+  const store = useReplayStore.getState();
+  const sorted = store.sortSnapshots([...store.snapshots], 'newest_first');
+  assertEq(sorted[0].snapshotId, afterImported!.snapshotId, '按最新优先时，导入的快照排在最前');
+
+  // 详情访问验证
+  const ok = s.restoreSnapshot(afterImported!.snapshotId);
+  assert(ok, '重启后导入的快照可以正常恢复');
+  assertEq(useReplayStore.getState().cursor, afterImported!.cursor, '恢复后游标与导入时一致');
+});
+
+// ============================================================
+// 新增链路测试 - 搜索、排序、详情中识别新导入
+// ============================================================
+test('链路-搜索排序详情：导入的快照可快速识别定位', () => {
+  const s = useReplayStore.getState();
+  s.clearSession();
+  s.loadSampleEvents();
+
+  for (let i = 0; i < 2; i++) s.stepForward();
+  ui_save('Alpha节点', '最早创建');
+  for (let i = 0; i < 2; i++) s.stepForward();
+  // 直接从 ui_save 返回值获取快照，避免查找时的问题
+  const betaSaveResult: any = ui_save('Beta节点', '第二个创建');
+  assertEq(betaSaveResult.kind, 'toast-success', 'Beta节点保存成功');
+  const betaSnapSafe = betaSaveResult.snapshot;
+  assert(!!betaSnapSafe, 'Beta节点快照对象存在');
+  assertEq(betaSnapSafe.name, 'Beta节点', 'Beta节点名称正确');
+
+  const jsonBeta = s.exportSnapshot(betaSnapSafe.snapshotId);
+  const impRes = ui_import(jsonBeta, 'keep_both');
+  assertEq(impRes.kind, 'toast-success', '导入成功');
+  const importedBeta = (impRes as any).snapshot;
+  assert(importedBeta, '导入返回的快照存在');
+  const importedName = importedBeta.name;
+  assert(importedName.includes('导入'), '导入的名称包含导入标记');
+
+  // 搜索：用原名能同时搜到本地和导入版
+  const store = useReplayStore.getState();
+  const byName = store.filterSnapshots('Beta');
+  assertEq(byName.length, 2, '搜索"Beta"返回本地+导入共2条');
+
+  // 搜索：用精确的名称导入后缀标记
+  const byNameImport = store.snapshots.filter(x => x.name.includes('(导入'));
+  assertEq(byNameImport.length, 1, '名称含"(导入"的有1条');
+  assertEq(byNameImport[0].snapshotId, importedBeta.snapshotId, '正是导入的那一条');
+
+  // 排序：按最新优先，导入的应该排最前（createdAt 更大）
+  const sortedNewest = store.sortSnapshots([...store.snapshots], 'newest_first');
+  assertEq(sortedNewest[0].snapshotId, importedBeta.snapshotId, '最新优先排序，导入的排第一');
+
+  // 排序：按名称A-Z，Alpha < Beta < Beta(导入...)
+  const sortedName = store.sortSnapshots([...store.snapshots], 'name_asc');
+  assert(sortedName[0].name.startsWith('Alpha'), '名称升序Alpha在前');
+  assert(sortedName[1].name === 'Beta节点', '原名Beta在中间');
+  assert(sortedName[2].name.startsWith('Beta节点') && sortedName[2].name.includes('导入'), '导入版Beta排在最后');
+
+  // 详情访问：能展开看到导入快照的完整信息（游标、事件数、告警数与源一致）
+  const detail = store.snapshots.find(x => x.snapshotId === importedBeta.snapshotId)!;
+  assertEq(detail.cursor, betaSnapSafe.cursor, '详情游标与源一致');
+  assertEq(detail.events.length, betaSnapSafe.events.length, '详情事件数与源一致');
+  assertEq(detail.activeAlarms.length, betaSnapSafe.activeAlarms.length, '详情告警数与源一致');
+  assertEq(detail.operatorNotes, betaSnapSafe.operatorNotes, '详情备注与源一致');
+});
+
+// ============================================================
+// 新增链路测试 - 连续多次导入（同秒不同毫秒）
+// ============================================================
+test('链路-同秒连续导入：毫秒级后缀确保全部唯一', () => {
+  const s = useReplayStore.getState();
+  s.clearSession();
+  s.loadSampleEvents();
+
+  for (let i = 0; i < 3; i++) s.stepForward();
+  const r = ui_save('快速导入', '连续导入测试');
+  const snapId = (r as any).snapshot.snapshotId;
+  const json = s.exportSnapshot(snapId);
+
+  const importedNames: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    const imp = ui_import(json, 'keep_both');
+    assertEq(imp.kind, 'toast-success');
+    importedNames.push((imp as any).snapshot.name);
+  }
+
+  // 4 个导入的名称必须全部唯一
+  const uniqueSet = new Set(importedNames);
+  assertEq(uniqueSet.size, 4, '连续4次导入名称全部唯一');
+
+  // 每个名称都包含原名和导入标记
+  for (const n of importedNames) {
+    assert(n.startsWith('快速导入'), `以原名开头: ${n}`);
+    assert(n.includes('导入'), `包含导入标记: ${n}`);
+    // 格式校验：YYYYMMDD_HHmmss_SSS 或带 _2 _3 后缀
+    assert(/\(导入 \d{8}_\d{6}_\d{3}(?:_\d+)?\)/.test(n) || /\(导入 \d{8}_\d{6}(?:_\d+)?\)/.test(n),
+      `时间戳格式正确: ${n}`);
+  }
+
+  // 总数：1 原始 + 4 导入 = 5
+  assertEq(useReplayStore.getState().snapshots.length, 5);
 });
 
 // ============================================================

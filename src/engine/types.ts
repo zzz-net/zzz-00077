@@ -129,6 +129,7 @@ export interface ImportResult {
   importedCount?: number;
   skippedCount?: number;
   renamedMap?: Record<string, string>;
+  overwrittenNames?: string[];
 }
 
 export interface ExportedSnapshotBatch {

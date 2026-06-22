@@ -140,11 +140,11 @@ function ImportConflictDialog({ conflictingNames, onOverwrite, onKeepBoth, onCan
           <div className="space-y-1.5">
             <p className="text-xs text-slate-300 flex items-start gap-1.5">
               <span className="text-blue-400 flex-shrink-0 mt-0.5">●</span>
-              选择「保留两份」— 保留本地原名，导入的快照自动重命名为 <span className="font-mono text-blue-300">"原名 (导入 YYYYMMDD_HHmmss)"</span>
+              选择「保留两份」— 保留本地原名，导入的快照自动重命名为 <span className="font-mono text-blue-300">"原名 (导入 YYYYMMDD_HHmmss_SSS)"</span>（含毫秒，精确唯一）
             </p>
             <p className="text-xs text-slate-300 flex items-start gap-1.5">
               <span className="text-orange-400 flex-shrink-0 mt-0.5">●</span>
-              选择「覆盖同名」— 用导入文件替换本地同名快照的全部内容
+              选择「覆盖同名」— 用导入文件内容替换本地同名快照，快照 ID 保持不变
             </p>
           </div>
           <p className="text-xs text-yellow-500/80 flex items-start gap-1.5">
@@ -807,7 +807,12 @@ export function SnapshotPanel() {
     const result = importSnapshots(pendingImportData.json, 'overwrite');
     if (result.success) {
       const names = (result.snapshots || []).map(s => s.name);
-      showToast('success', `已覆盖导入 ${names.length} 个快照：${names.join('、')}`);
+      const overwritten = result.overwrittenNames || [];
+      if (overwritten.length > 0) {
+        showToast('success', `导入完成：已覆盖 ${overwritten.length} 个同名快照（${overwritten.join('、')}），共导入 ${names.length} 个`);
+      } else {
+        showToast('success', `成功导入 ${names.length} 个快照：${names.join('、')}`);
+      }
     } else {
       showToast('error', `导入失败：${result.error || '未知错误'}`);
     }
@@ -822,8 +827,8 @@ export function SnapshotPanel() {
       const renamed = result.renamedMap || {};
       const renamedEntries = Object.entries(renamed);
       if (renamedEntries.length > 0) {
-        const detail = renamedEntries.map(([orig, newName]) => `${orig} → ${newName}`).join('；');
-        showToast('success', `成功导入 ${names.length} 个快照（重命名：${detail}）`);
+        const detail = renamedEntries.map(([orig, newName]) => `"${orig}" 改名为 "${newName}"`).join('；');
+        showToast('success', `导入完成（保留两份）：共 ${names.length} 个，其中 ${renamedEntries.length} 个同名已重命名 — ${detail}`);
       } else {
         showToast('success', `成功导入 ${names.length} 个快照：${names.join('、')}`);
       }

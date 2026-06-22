@@ -888,25 +888,38 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         return '';
       }
 
+      const now = Date.now();
       const exportData: ExportedSnapshot = {
         schemaVersion: SNAPSHOT_SCHEMA_VERSION,
-        exportTime: Date.now(),
+        exportTime: now,
         snapshot: JSON.parse(JSON.stringify(snapshot)),
       };
 
       const json = JSON.stringify(exportData, null, 2);
 
+      const formatFileTimestamp = (ts: number): string => {
+        const d = new Date(ts);
+        const y = d.getFullYear();
+        const mo = String(d.getMonth() + 1).padStart(2, '0');
+        const da = String(d.getDate()).padStart(2, '0');
+        const h = String(d.getHours()).padStart(2, '0');
+        const mi = String(d.getMinutes()).padStart(2, '0');
+        const s = String(d.getSeconds()).padStart(2, '0');
+        const ms = String(d.getMilliseconds()).padStart(3, '0');
+        return `${y}${mo}${da}_${h}${mi}${s}_${ms}`;
+      };
+
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `snapshot-${snapshot.name}-${Date.now()}.json`;
+      a.download = `snapshot-${snapshot.name}-${formatFileTimestamp(now)}.json`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
-      addSnapshotLog('export', [snapshot.snapshotId], [snapshot.name]);
+      addSnapshotLog('export', [snapshot.snapshotId], [snapshot.name], `导出时间戳:${formatFileTimestamp(now)}`);
       return json;
     },
 
@@ -1222,24 +1235,29 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       const existingNames = new Map(existingSnapshots.map(s => [s.name, s]));
       const importedSnapshots: Snapshot[] = [];
       const renamedMap: Record<string, string> = {};
+      const overwrittenNames: string[] = [];
       let skippedCount = 0;
+      const importBaseTime = Date.now();
+      let sameMsCounter = 0;
 
-      const generateTimeSuffix = (): string => {
-        const now = new Date();
-        const y = now.getFullYear();
-        const mo = String(now.getMonth() + 1).padStart(2, '0');
-        const d = String(now.getDate()).padStart(2, '0');
-        const h = String(now.getHours()).padStart(2, '0');
-        const mi = String(now.getMinutes()).padStart(2, '0');
-        const sec = String(now.getSeconds()).padStart(2, '0');
-        return `${y}${mo}${d}_${h}${mi}${sec}`;
+      const generateImportSuffix = (): string => {
+        const nowMs = importBaseTime + sameMsCounter++;
+        const d = new Date(nowMs);
+        const y = d.getFullYear();
+        const mo = String(d.getMonth() + 1).padStart(2, '0');
+        const da = String(d.getDate()).padStart(2, '0');
+        const h = String(d.getHours()).padStart(2, '0');
+        const mi = String(d.getMinutes()).padStart(2, '0');
+        const s = String(d.getSeconds()).padStart(2, '0');
+        const ms = String(d.getMilliseconds()).padStart(3, '0');
+        return `${y}${mo}${da}_${h}${mi}${s}_${ms}`;
       };
 
       for (const rawSnap of checkResult.snapshotsToImport || []) {
         let snap: Snapshot = {
           ...rawSnap,
           snapshotId: generateId(),
-          createdAt: rawSnap.createdAt || Date.now(),
+          createdAt: importBaseTime + sameMsCounter++,
         };
 
         const existing = existingNames.get(snap.name);
@@ -1252,15 +1270,14 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
             }
             importedSnapshots.push(existingSnapshots[idx]);
             existingNames.set(snap.name, existingSnapshots[idx]);
+            overwrittenNames.push(snap.name);
           } else if (conflictStrategy === 'keep_both') {
-            const timeSuffix = generateTimeSuffix();
+            const timeSuffix = generateImportSuffix();
             let newName = `${snap.name} (导入 ${timeSuffix})`;
-            if (existingNames.has(newName)) {
-              let counter = 2;
-              while (existingNames.has(`${snap.name} (导入 ${timeSuffix}_${counter})`)) {
-                counter++;
-              }
-              newName = `${snap.name} (导入 ${timeSuffix}_${counter})`;
+            let duplicateCounter = 2;
+            while (existingNames.has(newName)) {
+              newName = `${snap.name} (导入 ${timeSuffix}_${duplicateCounter})`;
+              duplicateCounter++;
             }
             renamedMap[snap.name] = newName;
             snap = { ...snap, name: newName };
@@ -1284,11 +1301,26 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       saveSnapshotsToStorage();
 
       if (importedSnapshots.length > 0) {
+        const renamedDetails = Object.entries(renamedMap)
+          .map(([orig, newName]) => `重命名:${orig}→${newName}`)
+          .join('; ');
+        const overwriteDetails = overwrittenNames.length > 0
+          ? `覆盖:${overwrittenNames.join(',')}`
+          : '';
+        const strategyLabel = conflictStrategy === 'overwrite'
+          ? '覆盖模式'
+          : conflictStrategy === 'keep_both'
+            ? '保留两份模式'
+            : conflictStrategy === 'cancel'
+              ? '取消模式'
+              : '未知模式';
+        const logDetail = [strategyLabel, renamedDetails, overwriteDetails].filter(Boolean).join(' | ');
+
         addSnapshotLog(
           'import',
           importedSnapshots.map(s => s.snapshotId),
           importedSnapshots.map(s => s.name),
-          conflictStrategy === 'overwrite' ? '覆盖模式' : conflictStrategy === 'keep_both' ? '保留两份模式' : undefined,
+          logDetail || undefined,
         );
       }
 
@@ -1301,6 +1333,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         hasConflict: checkResult.hasConflict,
         conflictingNames: checkResult.conflictingNames,
         renamedMap: Object.keys(renamedMap).length > 0 ? renamedMap : undefined,
+        overwrittenNames: overwrittenNames.length > 0 ? overwrittenNames : undefined,
       };
     },
 

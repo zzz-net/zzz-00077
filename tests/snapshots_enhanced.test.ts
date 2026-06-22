@@ -399,7 +399,7 @@ test('Enhanced-导入冲突_三种策略', () => {
   const renamedSnap = keepNames.find(n => n.startsWith('冲突快照') && n !== '冲突快照')!;
   assert(renamedSnap, '新名自动生成');
   assert(renamedSnap.includes('(导入 '), '新名包含"导入"标记');
-  assert(/\(导入 \d{8}_\d{6}\)/.test(renamedSnap), `新名包含时间戳格式: ${renamedSnap}`);
+  assert(/\(导入 \d{8}_\d{6}(?:_\d{3})?(?:_\d+)?\)/.test(renamedSnap), `新名包含时间戳格式（支持毫秒）: ${renamedSnap}`);
   assert(resultKeep.renamedMap, '返回renamedMap');
   assertEq(resultKeep.renamedMap!['冲突快照'], renamedSnap, 'renamedMap映射正确');
 
@@ -761,7 +761,7 @@ test('Import-同名导入_时间规则命名_提示列表落盘一致', () => {
   assert(result.renamedMap, '有renamedMap');
   const newNameA = result.renamedMap!['巡检点A'];
   assert(newNameA, '巡检点A被重命名');
-  assert(/\(导入 \d{8}_\d{6}\)/.test(newNameA), `新名符合时间格式: ${newNameA}`);
+  assert(/\(导入 \d{8}_\d{6}(?:_\d{3})?(?:_\d+)?\)/.test(newNameA), `新名符合时间格式（支持毫秒）: ${newNameA}`);
 
   const storedA = useReplayStore.getState().snapshots.find(s => s.name === newNameA);
   assert(storedA, '列表中存在重命名的快照');
