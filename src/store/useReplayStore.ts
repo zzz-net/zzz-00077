@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { Event, Alarm, Confirmation, Rule, Session, ReplayState, ExportedTimeline } from '../engine/types';
+import { Event, Alarm, Confirmation, Rule, Session, ReplayState, ExportedTimeline, Snapshot, ExportedSnapshot, SnapshotConflictResult, ImportResult } from '../engine/types';
 import { EventProcessor, importEvents } from '../engine/eventProcessor';
 import { validateUndoConfirmation } from '../engine/outOfOrderHandler';
 import { generateId } from '../utils/time';
@@ -29,6 +29,13 @@ interface ReplayActions {
   setErrorMessage: (message: string) => void;
   setSpeed: (speed: number) => void;
   setEvents: (events: Event[]) => void;
+  checkSnapshotConflict: (name: string) => SnapshotConflictResult;
+  saveSnapshot: (name: string, description?: string, forceOverwrite?: boolean) => { success: boolean; snapshot?: Snapshot; conflict?: boolean; error?: string };
+  restoreSnapshot: (snapshotId: string) => boolean;
+  undoRestoreSnapshot: () => boolean;
+  deleteSnapshot: (snapshotId: string) => boolean;
+  exportSnapshot: (snapshotId: string) => string;
+  importSnapshot: (jsonString: string) => ImportResult;
 }
 
 const STORAGE_KEYS = {
@@ -36,7 +43,10 @@ const STORAGE_KEYS = {
   EVENTS: 'replay:events',
   RULES: 'replay:rules',
   LAST_EXPORT: 'replay:lastExport',
+  SNAPSHOTS: 'replay:snapshots',
 };
+
+const SNAPSHOT_SCHEMA_VERSION = 1;
 
 const TIME_SCALE = 1000;
 
@@ -63,6 +73,8 @@ function getInitialState(): ReplayState {
     operatorNotes: '',
     lastExport: '',
     errorMessage: '',
+    snapshots: [],
+    preRestoreSnapshot: null,
   };
 }
 
@@ -75,6 +87,15 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       eventProcessor = new EventProcessor(get().rules, get().processedEvents);
     }
     return eventProcessor;
+  };
+
+  const saveSnapshotsToStorage = (): void => {
+    const state = get();
+    try {
+      localStorage.setItem(STORAGE_KEYS.SNAPSHOTS, JSON.stringify(state.snapshots));
+    } catch (e) {
+      console.error('保存快照失败:', e);
+    }
   };
 
   const saveToStorage = (): void => {
@@ -93,6 +114,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       localStorage.setItem(STORAGE_KEYS.EVENTS, JSON.stringify(state.events));
       localStorage.setItem(STORAGE_KEYS.RULES, JSON.stringify(state.rules));
       localStorage.setItem(STORAGE_KEYS.LAST_EXPORT, state.lastExport);
+      saveSnapshotsToStorage();
     } catch (e) {
       console.error('保存会话失败:', e);
     }
@@ -114,7 +136,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       if (!state.isPlaying) return;
 
       const nextCursor = state.cursor + speed * TIME_SCALE;
-      let newCursor = Math.min(nextCursor, state.endTime);
+      const newCursor = Math.min(nextCursor, state.endTime);
       
       let currentIndex = state.currentEventIndex;
       let currentAlarms = [...state.activeAlarms];
@@ -445,12 +467,14 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         const eventsStr = localStorage.getItem(STORAGE_KEYS.EVENTS);
         const rulesStr = localStorage.getItem(STORAGE_KEYS.RULES);
         const lastExportStr = localStorage.getItem(STORAGE_KEYS.LAST_EXPORT);
+        const snapshotsStr = localStorage.getItem(STORAGE_KEYS.SNAPSHOTS);
 
         if (!sessionStr || !eventsStr) return;
 
         const session: Session = JSON.parse(sessionStr);
         const events: Event[] = JSON.parse(eventsStr);
         const rules: Rule[] = rulesStr ? JSON.parse(rulesStr) : defaultRules;
+        const snapshots: Snapshot[] = snapshotsStr ? JSON.parse(snapshotsStr) : [];
 
         stopTick();
         eventProcessor = null;
@@ -467,6 +491,8 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
           confirmations: session.confirmations,
           operatorNotes: session.operatorNotes,
           lastExport: lastExportStr || '',
+          snapshots,
+          preRestoreSnapshot: null,
           isPlaying: false,
           currentEventIndex: 0,
           activeAlarms: [],
@@ -581,6 +607,262 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         isPlaying: false,
       });
       saveToStorage();
+    },
+
+    checkSnapshotConflict: (name: string): SnapshotConflictResult => {
+      const state = get();
+      const existing = state.snapshots.find(s => s.name === name);
+      return {
+        hasConflict: !!existing,
+        existingSnapshot: existing,
+      };
+    },
+
+    saveSnapshot: (name: string, description?: string, forceOverwrite = false) => {
+      if (!name || !name.trim()) {
+        return { success: false, error: '快照名称不能为空' };
+      }
+
+      const state = get();
+      const conflict = get().checkSnapshotConflict(name);
+
+      if (conflict.hasConflict && !forceOverwrite) {
+        return { success: false, conflict: true, existingSnapshot: conflict.existingSnapshot };
+      }
+
+      const snapshot: Snapshot = {
+        snapshotId: generateId(),
+        name: name.trim(),
+        description: description?.trim(),
+        createdAt: Date.now(),
+        cursor: state.cursor,
+        currentEventIndex: state.currentEventIndex,
+        events: JSON.parse(JSON.stringify(state.events)),
+        activeAlarms: JSON.parse(JSON.stringify(state.activeAlarms)),
+        processedEvents: JSON.parse(JSON.stringify(state.processedEvents)),
+        pendingEvents: JSON.parse(JSON.stringify(state.pendingEvents)),
+        confirmations: JSON.parse(JSON.stringify(state.confirmations)),
+        rules: JSON.parse(JSON.stringify(state.rules)),
+        operator: state.operator,
+        operatorNotes: state.operatorNotes,
+        startTime: state.startTime,
+        endTime: state.endTime,
+      };
+
+      let newSnapshots: Snapshot[];
+      if (conflict.hasConflict && forceOverwrite) {
+        newSnapshots = state.snapshots.map(s =>
+          s.name === name ? { ...snapshot, snapshotId: s.snapshotId, createdAt: s.createdAt } : s
+        );
+      } else {
+        newSnapshots = [...state.snapshots, snapshot];
+      }
+
+      set({ snapshots: newSnapshots });
+      saveSnapshotsToStorage();
+
+      return { success: true, snapshot };
+    },
+
+    restoreSnapshot: (snapshotId: string): boolean => {
+      const state = get();
+      const snapshot = state.snapshots.find(s => s.snapshotId === snapshotId);
+
+      if (!snapshot) {
+        set({ errorMessage: '快照不存在' });
+        return false;
+      }
+
+      const currentState = get();
+      const preRestoreSnapshot: Snapshot = {
+        snapshotId: generateId(),
+        name: '__pre_restore__',
+        createdAt: Date.now(),
+        cursor: currentState.cursor,
+        currentEventIndex: currentState.currentEventIndex,
+        events: JSON.parse(JSON.stringify(currentState.events)),
+        activeAlarms: JSON.parse(JSON.stringify(currentState.activeAlarms)),
+        processedEvents: JSON.parse(JSON.stringify(currentState.processedEvents)),
+        pendingEvents: JSON.parse(JSON.stringify(currentState.pendingEvents)),
+        confirmations: JSON.parse(JSON.stringify(currentState.confirmations)),
+        rules: JSON.parse(JSON.stringify(currentState.rules)),
+        operator: currentState.operator,
+        operatorNotes: currentState.operatorNotes,
+        startTime: currentState.startTime,
+        endTime: currentState.endTime,
+      };
+
+      stopTick();
+      eventProcessor = new EventProcessor(snapshot.rules, snapshot.processedEvents);
+
+      const duration = snapshot.endTime - snapshot.startTime;
+      const progress = duration > 0 ? ((snapshot.cursor - snapshot.startTime) / duration * 100) : 0;
+
+      set({
+        cursor: snapshot.cursor,
+        currentEventIndex: snapshot.currentEventIndex,
+        events: JSON.parse(JSON.stringify(snapshot.events)),
+        activeAlarms: JSON.parse(JSON.stringify(snapshot.activeAlarms)),
+        processedEvents: JSON.parse(JSON.stringify(snapshot.processedEvents)),
+        pendingEvents: JSON.parse(JSON.stringify(snapshot.pendingEvents)),
+        confirmations: JSON.parse(JSON.stringify(snapshot.confirmations)),
+        rules: JSON.parse(JSON.stringify(snapshot.rules)),
+        operator: snapshot.operator,
+        operatorNotes: snapshot.operatorNotes,
+        startTime: snapshot.startTime,
+        endTime: snapshot.endTime,
+        progress,
+        isPlaying: false,
+        preRestoreSnapshot,
+        errorMessage: '',
+      });
+
+      saveToStorage();
+      return true;
+    },
+
+    undoRestoreSnapshot: (): boolean => {
+      const state = get();
+      const preSnapshot = state.preRestoreSnapshot;
+
+      if (!preSnapshot) {
+        set({ errorMessage: '没有可撤销的恢复操作' });
+        return false;
+      }
+
+      stopTick();
+      eventProcessor = new EventProcessor(preSnapshot.rules, preSnapshot.processedEvents);
+
+      const duration = preSnapshot.endTime - preSnapshot.startTime;
+      const progress = duration > 0 ? ((preSnapshot.cursor - preSnapshot.startTime) / duration * 100) : 0;
+
+      set({
+        cursor: preSnapshot.cursor,
+        currentEventIndex: preSnapshot.currentEventIndex,
+        events: JSON.parse(JSON.stringify(preSnapshot.events)),
+        activeAlarms: JSON.parse(JSON.stringify(preSnapshot.activeAlarms)),
+        processedEvents: JSON.parse(JSON.stringify(preSnapshot.processedEvents)),
+        pendingEvents: JSON.parse(JSON.stringify(preSnapshot.pendingEvents)),
+        confirmations: JSON.parse(JSON.stringify(preSnapshot.confirmations)),
+        rules: JSON.parse(JSON.stringify(preSnapshot.rules)),
+        operator: preSnapshot.operator,
+        operatorNotes: preSnapshot.operatorNotes,
+        startTime: preSnapshot.startTime,
+        endTime: preSnapshot.endTime,
+        progress,
+        isPlaying: false,
+        preRestoreSnapshot: null,
+        errorMessage: '',
+      });
+
+      saveToStorage();
+      return true;
+    },
+
+    deleteSnapshot: (snapshotId: string): boolean => {
+      const state = get();
+      const exists = state.snapshots.some(s => s.snapshotId === snapshotId);
+
+      if (!exists) {
+        set({ errorMessage: '快照不存在' });
+        return false;
+      }
+
+      set({
+        snapshots: state.snapshots.filter(s => s.snapshotId !== snapshotId),
+      });
+      saveSnapshotsToStorage();
+      return true;
+    },
+
+    exportSnapshot: (snapshotId: string): string => {
+      const state = get();
+      const snapshot = state.snapshots.find(s => s.snapshotId === snapshotId);
+
+      if (!snapshot) {
+        set({ errorMessage: '快照不存在' });
+        return '';
+      }
+
+      const exportData: ExportedSnapshot = {
+        schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+        exportTime: Date.now(),
+        snapshot: JSON.parse(JSON.stringify(snapshot)),
+      };
+
+      const json = JSON.stringify(exportData, null, 2);
+
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `snapshot-${snapshot.name}-${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      return json;
+    },
+
+    importSnapshot: (jsonString: string): ImportResult => {
+      try {
+        const data = JSON.parse(jsonString);
+
+        if (!data || typeof data !== 'object') {
+          return { success: false, error: '无效的JSON格式' };
+        }
+
+        if (data.schemaVersion !== SNAPSHOT_SCHEMA_VERSION) {
+          return {
+            success: false,
+            error: `不兼容的快照版本：期望 v${SNAPSHOT_SCHEMA_VERSION}，实际 v${data.schemaVersion}`,
+          };
+        }
+
+        if (!data.snapshot || typeof data.snapshot !== 'object') {
+          return { success: false, error: '快照数据缺失或损坏' };
+        }
+
+        const snap = data.snapshot;
+        const requiredFields = [
+          'snapshotId', 'name', 'createdAt', 'cursor', 'currentEventIndex',
+          'events', 'activeAlarms', 'processedEvents', 'pendingEvents',
+          'confirmations', 'rules', 'operator', 'startTime', 'endTime',
+        ];
+
+        for (const field of requiredFields) {
+          if (!(field in snap)) {
+            return { success: false, error: `快照字段缺失: ${field}` };
+          }
+        }
+
+        if (!Array.isArray(snap.events) || snap.events.length === 0) {
+          return { success: false, error: '快照事件数据无效' };
+        }
+
+        const importedSnapshot: Snapshot = {
+          ...snap,
+          snapshotId: generateId(),
+          createdAt: Date.now(),
+        };
+
+        const state = get();
+        const conflict = state.snapshots.find(s => s.name === importedSnapshot.name);
+        if (conflict) {
+          importedSnapshot.name = `${importedSnapshot.name} (导入于 ${new Date().toLocaleString()})`;
+        }
+
+        set({
+          snapshots: [...state.snapshots, importedSnapshot],
+          errorMessage: '',
+        });
+        saveSnapshotsToStorage();
+
+        return { success: true, snapshot: importedSnapshot };
+      } catch (e) {
+        return { success: false, error: `解析失败: ${(e as Error).message}` };
+      }
     },
   };
 });

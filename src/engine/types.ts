@@ -80,6 +80,8 @@ export interface ReplayState {
   operatorNotes: string;
   lastExport: string;
   errorMessage: string;
+  snapshots: Snapshot[];
+  preRestoreSnapshot: Snapshot | null;
 }
 
 export interface ExportedTimeline {
@@ -93,4 +95,40 @@ export interface ExportedTimeline {
   ruleVersion?: string;
   operator?: string;
   operatorNotes?: string;
+}
+
+export interface Snapshot {
+  snapshotId: string;
+  name: string;
+  description?: string;
+  createdAt: number;
+  cursor: number;
+  currentEventIndex: number;
+  events: Event[];
+  activeAlarms: Alarm[];
+  processedEvents: Event[];
+  pendingEvents: Event[];
+  confirmations: Confirmation[];
+  rules: Rule[];
+  operator: string;
+  operatorNotes: string;
+  startTime: number;
+  endTime: number;
+}
+
+export interface ExportedSnapshot {
+  schemaVersion: number;
+  exportTime: number;
+  snapshot: Snapshot;
+}
+
+export interface SnapshotConflictResult {
+  hasConflict: boolean;
+  existingSnapshot?: Snapshot;
+}
+
+export interface ImportResult {
+  success: boolean;
+  snapshot?: Snapshot;
+  error?: string;
 }
