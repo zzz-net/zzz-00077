@@ -661,7 +661,10 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       set({ snapshots: newSnapshots });
       saveSnapshotsToStorage();
 
-      return { success: true, snapshot };
+      const returnedSnapshot = conflict.hasConflict && forceOverwrite
+        ? newSnapshots.find(s => s.name === name)!
+        : snapshot;
+      return { success: true, snapshot: returnedSnapshot };
     },
 
     restoreSnapshot: (snapshotId: string): boolean => {

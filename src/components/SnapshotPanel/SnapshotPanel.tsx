@@ -39,27 +39,46 @@ function ConflictDialog({ name, existingSnapshot, onCancel, onConfirm }: Conflic
           <p className="text-sm text-slate-300">
             已存在名为 <span className="text-yellow-400 font-mono">"{name}"</span> 的快照，是否继续覆盖？
           </p>
-          <div className="bg-slate-900/60 rounded p-3 border border-slate-700 text-xs space-y-1">
-            <div className="flex gap-2">
-              <span className="text-slate-500 w-16">创建时间</span>
-              <span className="text-slate-300">{formatDateTime(existingSnapshot.createdAt)}</span>
+          <div className="bg-slate-900/60 rounded p-3 border border-slate-700 text-xs space-y-1.5">
+            <div className="text-[11px] text-yellow-500/80 mb-2 flex items-start gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+              以下是「{name}」原有快照当时保存的内容，覆盖后这些会被替换为当前状态：
             </div>
-            <div className="flex gap-2">
-              <span className="text-slate-500 w-16">游标位置</span>
-              <span className="text-slate-300">{formatTimestamp(existingSnapshot.cursor)}</span>
+            <div className="flex gap-2 items-start">
+              <span className="text-slate-500 w-20 flex-shrink-0" title="这个快照是什么时候创建的">创建时间</span>
+              <div>
+                <span className="text-slate-300">{formatDateTime(existingSnapshot.createdAt)}</span>
+                <span className="text-slate-500 block text-[10px]">→ 何时保存的这个节点</span>
+              </div>
             </div>
-            <div className="flex gap-2">
-              <span className="text-slate-500 w-16">告警数</span>
-              <span className="text-slate-300">{existingSnapshot.activeAlarms.length} 个</span>
+            <div className="flex gap-2 items-start">
+              <span className="text-slate-500 w-20 flex-shrink-0" title="当时时间轴播放到什么位置">游标位置</span>
+              <div>
+                <span className="text-slate-300">{formatTimestamp(existingSnapshot.cursor)}</span>
+                <span className="text-slate-500 block text-[10px]">→ 当时时间轴播放的位置</span>
+              </div>
             </div>
-            <div className="flex gap-2">
-              <span className="text-slate-500 w-16">确认记录</span>
-              <span className="text-slate-300">{existingSnapshot.confirmations.length} 条</span>
+            <div className="flex gap-2 items-start">
+              <span className="text-slate-500 w-20 flex-shrink-0" title="当时有多少活动告警">告警数</span>
+              <div>
+                <span className="text-slate-300">{existingSnapshot.activeAlarms.length} 个</span>
+                <span className="text-slate-500 block text-[10px]">→ 当时存在的活动告警数量</span>
+              </div>
+            </div>
+            <div className="flex gap-2 items-start">
+              <span className="text-slate-500 w-20 flex-shrink-0" title="当时已经确认了多少条告警">确认记录</span>
+              <div>
+                <span className="text-slate-300">{existingSnapshot.confirmations.length} 条</span>
+                <span className="text-slate-500 block text-[10px]">→ 当时已确认/撤销的操作数</span>
+              </div>
             </div>
             {existingSnapshot.description && (
-              <div className="flex gap-2">
-                <span className="text-slate-500 w-16">描述</span>
-                <span className="text-slate-300">{existingSnapshot.description}</span>
+              <div className="flex gap-2 items-start">
+                <span className="text-slate-500 w-20 flex-shrink-0" title="保存时填写的描述">描述</span>
+                <div>
+                  <span className="text-slate-300">{existingSnapshot.description}</span>
+                  <span className="text-slate-500 block text-[10px]">→ 保存时填写的备注说明</span>
+                </div>
               </div>
             )}
           </div>
