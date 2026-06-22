@@ -439,12 +439,15 @@ export function SnapshotPanel() {
 
       <div className="flex-1 overflow-y-auto space-y-2 pr-1">
         {sortedSnapshots.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full text-slate-500">
-            <Camera className="w-12 h-12 mb-2 opacity-30" />
-            <p className="text-sm">暂无场景快照</p>
-            <p className="text-xs mt-1 text-center px-4">
-              在演练过程中随时命名保存，方便一键回溯或分享给同事
-            </p>
+          <div className="flex flex-col items-center justify-center h-full text-slate-500 px-2">
+            <Camera className="w-12 h-12 mb-3 opacity-30" />
+            <p className="text-sm font-medium text-slate-400 mb-2">还没有保存任何快照</p>
+            <div className="text-[11px] text-center space-y-1 text-slate-500 max-w-[240px]">
+              <p>📌 演练中随时在上方输入名称点「保存」</p>
+              <p>🔄 之后可一键恢复到保存时的完整状态</p>
+              <p>📤 支持导出 JSON 给同事导入继续演练</p>
+              <p>💾 刷新页面也不会丢失</p>
+            </div>
           </div>
         ) : (
           sortedSnapshots.map((snap) => (
@@ -462,11 +465,26 @@ export function SnapshotPanel() {
 
       {sortedSnapshots.length > 0 && (
         <div className="mt-3 pt-3 border-t border-slate-700">
-          <div className="flex items-center gap-2 text-[11px] text-slate-500 leading-relaxed">
-            <FileJson className="w-3.5 h-3.5 flex-shrink-0" />
-            <span>
-              快照持久化保存在本地。导入损坏/版本不兼容文件不会污染现有会话。
-            </span>
+          <div className="flex items-start gap-2 text-[11px] text-slate-500 leading-relaxed">
+            <FileJson className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+            <div className="space-y-0.5">
+              <p>• 点击卡片展开查看详情，可「恢复」「导出」「删除」</p>
+              <p>• 恢复后可点击蓝色横幅的「撤销恢复」回到之前状态</p>
+              <p>• 快照持久化保存在本地，导入损坏文件不会污染当前会话</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {sortedSnapshots.length === 0 && (
+        <div className="mt-3 pt-3 border-t border-slate-700">
+          <div className="flex items-start gap-2 text-[11px] text-slate-600 leading-relaxed">
+            <FileJson className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+            <div className="space-y-0.5">
+              <p>• 快照包含：事件时间轴、游标、告警、确认、备注、规则</p>
+              <p>• 右上角「导入」按钮可导入别人分享的快照 JSON</p>
+              <p>• 同名保存会弹确认框，不会意外覆盖</p>
+            </div>
           </div>
         </div>
       )}
