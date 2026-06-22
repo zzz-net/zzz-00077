@@ -1,5 +1,9 @@
 import { create } from 'zustand';
-import { Event, Alarm, Confirmation, Rule, Session, ReplayState, ExportedTimeline, Snapshot, ExportedSnapshot, SnapshotConflictResult, ImportResult } from '../engine/types';
+import {
+  Event, Alarm, Confirmation, Rule, Session, ReplayState, ExportedTimeline, Snapshot,
+  ExportedSnapshot, SnapshotConflictResult, ImportResult, SnapshotOperationLog,
+  SnapshotLogAction, ImportConflictStrategy, ExportedSnapshotBatch, SnapshotSortOrder,
+} from '../engine/types';
 import { EventProcessor, importEvents } from '../engine/eventProcessor';
 import { validateUndoConfirmation } from '../engine/outOfOrderHandler';
 import { generateId } from '../utils/time';
@@ -35,7 +39,18 @@ interface ReplayActions {
   undoRestoreSnapshot: () => boolean;
   deleteSnapshot: (snapshotId: string) => boolean;
   exportSnapshot: (snapshotId: string) => string;
-  importSnapshot: (jsonString: string) => ImportResult;
+  importSnapshot: (jsonString: string, conflictStrategy?: ImportConflictStrategy) => ImportResult;
+  renameSnapshot: (snapshotId: string, newName: string) => { success: boolean; error?: string };
+  updateSnapshotDescription: (snapshotId: string, description: string) => { success: boolean; error?: string };
+  batchRenameSnapshots: (snapshotIds: string[], pattern: 'prefix' | 'suffix' | 'replace', value: string, startIndex?: number) => { success: boolean; updatedCount: number; errors?: string[] };
+  batchUpdateSnapshotsDescription: (snapshotIds: string[], description: string, mode?: 'replace' | 'append' | 'prepend') => { success: boolean; updatedCount: number };
+  batchDeleteSnapshots: (snapshotIds: string[]) => { success: boolean; deletedCount: number };
+  batchExportSnapshots: (snapshotIds: string[]) => string;
+  filterSnapshots: (keyword: string) => Snapshot[];
+  sortSnapshots: (snapshots: Snapshot[], order: SnapshotSortOrder) => Snapshot[];
+  checkImportConflicts: (jsonString: string) => { success: boolean; hasConflict: boolean; conflictingNames?: string[]; snapshotsToImport?: Snapshot[]; error?: string };
+  importSnapshots: (jsonString: string, conflictStrategy: ImportConflictStrategy) => ImportResult;
+  clearSnapshotLogs: () => void;
 }
 
 const STORAGE_KEYS = {
@@ -44,9 +59,12 @@ const STORAGE_KEYS = {
   RULES: 'replay:rules',
   LAST_EXPORT: 'replay:lastExport',
   SNAPSHOTS: 'replay:snapshots',
+  SNAPSHOT_LOGS: 'replay:snapshotLogs',
 };
 
 const SNAPSHOT_SCHEMA_VERSION = 1;
+const BATCH_EXPORT_SCHEMA_VERSION = 1;
+const MAX_LOG_ENTRIES = 500;
 
 const TIME_SCALE = 1000;
 
@@ -54,7 +72,7 @@ function getInitialState(): ReplayState {
   const sortedEvents = [...sampleEvents].sort((a, b) => a.timestamp - b.timestamp);
   const startTime = sortedEvents.length > 0 ? sortedEvents[0].timestamp : 0;
   const endTime = sortedEvents.length > 0 ? sortedEvents[sortedEvents.length - 1].timestamp : 0;
-  
+
   return {
     isPlaying: false,
     speed: 1,
@@ -75,6 +93,7 @@ function getInitialState(): ReplayState {
     errorMessage: '',
     snapshots: [],
     preRestoreSnapshot: null,
+    snapshotLogs: [],
   };
 }
 
@@ -98,6 +117,37 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
     }
   };
 
+  const saveLogsToStorage = (): void => {
+    const state = get();
+    try {
+      const logs = state.snapshotLogs.slice(-MAX_LOG_ENTRIES);
+      localStorage.setItem(STORAGE_KEYS.SNAPSHOT_LOGS, JSON.stringify(logs));
+    } catch (e) {
+      console.error('保存操作日志失败:', e);
+    }
+  };
+
+  const addSnapshotLog = (
+    action: SnapshotLogAction,
+    snapshotIds: string[],
+    snapshotNames: string[],
+    detail?: string,
+  ): void => {
+    const state = get();
+    const log: SnapshotOperationLog = {
+      logId: generateId(),
+      action,
+      timestamp: Date.now(),
+      snapshotIds,
+      snapshotNames,
+      operator: state.operator,
+      detail,
+    };
+    const newLogs = [...state.snapshotLogs, log].slice(-MAX_LOG_ENTRIES);
+    set({ snapshotLogs: newLogs });
+    saveLogsToStorage();
+  };
+
   const saveToStorage = (): void => {
     const state = get();
     try {
@@ -109,12 +159,13 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         exportContent: state.lastExport,
         savedAt: Date.now(),
       };
-      
+
       localStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(session));
       localStorage.setItem(STORAGE_KEYS.EVENTS, JSON.stringify(state.events));
       localStorage.setItem(STORAGE_KEYS.RULES, JSON.stringify(state.rules));
       localStorage.setItem(STORAGE_KEYS.LAST_EXPORT, state.lastExport);
       saveSnapshotsToStorage();
+      saveLogsToStorage();
     } catch (e) {
       console.error('保存会话失败:', e);
     }
@@ -130,14 +181,14 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
   const startTick = (speed: number): void => {
     stopTick();
     set({ isPlaying: true });
-    
+
     tickInterval = setInterval(() => {
       const state = get();
       if (!state.isPlaying) return;
 
       const nextCursor = state.cursor + speed * TIME_SCALE;
       const newCursor = Math.min(nextCursor, state.endTime);
-      
+
       let currentIndex = state.currentEventIndex;
       let currentAlarms = [...state.activeAlarms];
       const newProcessedEvents = [...state.processedEvents];
@@ -151,15 +202,15 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
           const result = processor.processEvent(event, currentAlarms, state.events);
           currentAlarms = result.updatedAlarms;
           newProcessedEvents.push(result.markedEvent);
-          
+
           if (result.status === 'pending') {
             currentPendingEvents.push(result.markedEvent);
           } else if (result.status === 'matched_early_clear' && result.markedEvent.correlationId) {
             currentPendingEvents = currentPendingEvents.filter(
-              e => e.correlationId !== result.markedEvent.correlationId
+              e => e.correlationId !== result.markedEvent.correlationId,
             );
           }
-          
+
           currentIndex++;
         } else {
           break;
@@ -207,12 +258,12 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         const result = processor.processEvent(event, currentAlarms, state.events);
         currentAlarms = result.updatedAlarms;
         processedEvents.push(result.markedEvent);
-        
+
         if (result.status === 'pending') {
           currentPendingEvents.push(result.markedEvent);
         } else if (result.status === 'matched_early_clear' && result.markedEvent.correlationId) {
           currentPendingEvents = currentPendingEvents.filter(
-            e => e.correlationId !== result.markedEvent.correlationId
+            e => e.correlationId !== result.markedEvent.correlationId,
           );
         }
         currentIndex++;
@@ -234,6 +285,27 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       pendingEvents: currentPendingEvents,
       progress,
     });
+  };
+
+  const validateSnapshot = (snap: unknown): { valid: boolean; error?: string } => {
+    if (!snap || typeof snap !== 'object') {
+      return { valid: false, error: '快照数据不是有效对象' };
+    }
+    const s = snap as Record<string, unknown>;
+    const requiredFields = [
+      'snapshotId', 'name', 'createdAt', 'cursor', 'currentEventIndex',
+      'events', 'activeAlarms', 'processedEvents', 'pendingEvents',
+      'confirmations', 'rules', 'operator', 'startTime', 'endTime',
+    ];
+    for (const field of requiredFields) {
+      if (!(field in s)) {
+        return { valid: false, error: `快照字段缺失: ${field}` };
+      }
+    }
+    if (!Array.isArray(s.events) || s.events.length === 0) {
+      return { valid: false, error: '快照事件数据无效' };
+    }
+    return { valid: true };
   };
 
   return {
@@ -285,11 +357,14 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       stopTick();
       const initial = getInitialState();
       eventProcessor = null;
+      const curr = get();
       set({
         ...initial,
-        events: get().events,
-        rules: get().rules,
-        operator: get().operator,
+        events: curr.events,
+        rules: curr.rules,
+        operator: curr.operator,
+        snapshots: curr.snapshots,
+        snapshotLogs: curr.snapshotLogs,
       });
       saveToStorage();
     },
@@ -297,7 +372,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
     confirmAlarm: (alarmId: string, remark: string) => {
       const state = get();
       const alarmIndex = state.activeAlarms.findIndex(a => a.alarmId === alarmId);
-      
+
       if (alarmIndex === -1) {
         set({ errorMessage: '告警不存在' });
         return;
@@ -325,14 +400,14 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         confirmations: [...state.confirmations, confirmation],
         errorMessage: '',
       });
-      
+
       saveToStorage();
     },
 
     undoConfirmation: (confirmationId: string) => {
       const state = get();
       const validation = validateUndoConfirmation(confirmationId, state.confirmations);
-      
+
       if (!validation.valid) {
         set({ errorMessage: validation.error || '撤销失败' });
         return;
@@ -352,11 +427,11 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       };
 
       const updatedConfirmations = state.confirmations.map(c =>
-        c.confirmationId === confirmationId ? { ...c, active: false } : c
+        c.confirmationId === confirmationId ? { ...c, active: false } : c,
       );
 
       const updatedAlarms = state.activeAlarms.map(a =>
-        a.confirmationId === confirmationId ? { ...a, status: 'active' as const, confirmationId: undefined } : a
+        a.confirmationId === confirmationId ? { ...a, status: 'active' as const, confirmationId: undefined } : a,
       );
 
       set({
@@ -364,7 +439,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         activeAlarms: updatedAlarms,
         errorMessage: '',
       });
-      
+
       saveToStorage();
     },
 
@@ -374,7 +449,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       const startTime = events[0].timestamp;
       const endTime = events[events.length - 1].timestamp;
       eventProcessor = null;
-      
+
       set({
         events,
         startTime,
@@ -397,7 +472,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         const startTime = events.length > 0 ? events[0].timestamp : 0;
         const endTime = events.length > 0 ? events[events.length - 1].timestamp : 0;
         eventProcessor = null;
-        
+
         set({
           events,
           startTime,
@@ -419,7 +494,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
 
     exportTimeline: (includeState = true): string => {
       const state = get();
-      
+
       const eventsWithStatus: Event[] = state.events.map((event, index) => {
         const processed = state.processedEvents[index];
         if (processed && processed.status) {
@@ -427,7 +502,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         }
         return { ...event, status: 'normal' };
       });
-      
+
       const exportData: ExportedTimeline = {
         exportTime: Date.now(),
         replayCursor: state.cursor,
@@ -436,18 +511,18 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         confirmations: state.confirmations,
         includeState,
       };
-      
+
       if (includeState) {
         exportData.cursorPosition = state.cursor;
         exportData.ruleVersion = state.rules.length > 0 ? state.rules[0].version : 'v1.0';
         exportData.operator = state.operator;
         exportData.operatorNotes = state.operatorNotes;
       }
-      
+
       const json = JSON.stringify(exportData, null, 2);
       set({ lastExport: json });
       saveToStorage();
-      
+
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -457,7 +532,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      
+
       return json;
     },
 
@@ -468,13 +543,31 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         const rulesStr = localStorage.getItem(STORAGE_KEYS.RULES);
         const lastExportStr = localStorage.getItem(STORAGE_KEYS.LAST_EXPORT);
         const snapshotsStr = localStorage.getItem(STORAGE_KEYS.SNAPSHOTS);
+        const logsStr = localStorage.getItem(STORAGE_KEYS.SNAPSHOT_LOGS);
 
         if (!sessionStr || !eventsStr) return;
 
         const session: Session = JSON.parse(sessionStr);
         const events: Event[] = JSON.parse(eventsStr);
         const rules: Rule[] = rulesStr ? JSON.parse(rulesStr) : defaultRules;
-        const snapshots: Snapshot[] = snapshotsStr ? JSON.parse(snapshotsStr) : [];
+        let snapshots: Snapshot[] = [];
+        if (snapshotsStr) {
+          try {
+            const parsed = JSON.parse(snapshotsStr);
+            snapshots = Array.isArray(parsed) ? parsed.filter((s): s is Snapshot => validateSnapshot(s).valid) : [];
+          } catch {
+            snapshots = [];
+          }
+        }
+        let snapshotLogs: SnapshotOperationLog[] = [];
+        if (logsStr) {
+          try {
+            const parsed = JSON.parse(logsStr);
+            snapshotLogs = Array.isArray(parsed) ? parsed : [];
+          } catch {
+            snapshotLogs = [];
+          }
+        }
 
         stopTick();
         eventProcessor = null;
@@ -492,6 +585,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
           operatorNotes: session.operatorNotes,
           lastExport: lastExportStr || '',
           snapshots,
+          snapshotLogs,
           preRestoreSnapshot: null,
           isPlaying: false,
           currentEventIndex: 0,
@@ -506,7 +600,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         const state = get();
         const activeAlarmsWithConfirmations = state.activeAlarms.map(alarm => {
           const conf = session.confirmations.find(
-            c => c.alarmId === alarm.alarmId && c.type === 'confirm' && c.active
+            c => c.alarmId === alarm.alarmId && c.type === 'confirm' && c.active,
           );
           if (conf) {
             return { ...alarm, status: 'confirmed' as const, confirmationId: conf.confirmationId };
@@ -569,7 +663,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
     toggleRule: (ruleId) => {
       set(state => ({
         rules: state.rules.map(r =>
-          r.ruleId === ruleId ? { ...r, enabled: !r.enabled } : r
+          r.ruleId === ruleId ? { ...r, enabled: !r.enabled } : r,
         ),
       }));
       saveToStorage();
@@ -590,10 +684,10 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       const sorted = [...events].sort((a, b) => a.timestamp - b.timestamp);
       const startTime = sorted.length > 0 ? sorted[0].timestamp : 0;
       const endTime = sorted.length > 0 ? sorted[sorted.length - 1].timestamp : 0;
-      
+
       stopTick();
       eventProcessor = null;
-      
+
       set({
         events: sorted,
         startTime,
@@ -650,20 +744,24 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       };
 
       let newSnapshots: Snapshot[];
+      let returnedSnapshot: Snapshot;
+      let logAction: SnapshotLogAction = 'create';
+
       if (conflict.hasConflict && forceOverwrite) {
         newSnapshots = state.snapshots.map(s =>
-          s.name === name ? { ...snapshot, snapshotId: s.snapshotId, createdAt: s.createdAt } : s
+          s.name === name ? { ...snapshot, snapshotId: s.snapshotId, createdAt: s.createdAt } : s,
         );
+        returnedSnapshot = newSnapshots.find(s => s.name === name)!;
+        logAction = 'update';
       } else {
         newSnapshots = [...state.snapshots, snapshot];
+        returnedSnapshot = snapshot;
       }
 
       set({ snapshots: newSnapshots });
       saveSnapshotsToStorage();
+      addSnapshotLog(logAction, [returnedSnapshot.snapshotId], [returnedSnapshot.name], description?.trim());
 
-      const returnedSnapshot = conflict.hasConflict && forceOverwrite
-        ? newSnapshots.find(s => s.name === name)!
-        : snapshot;
       return { success: true, snapshot: returnedSnapshot };
     },
 
@@ -721,6 +819,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       });
 
       saveToStorage();
+      addSnapshotLog('restore', [snapshot.snapshotId], [snapshot.name]);
       return true;
     },
 
@@ -759,14 +858,15 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       });
 
       saveToStorage();
+      addSnapshotLog('undo_restore', [], []);
       return true;
     },
 
     deleteSnapshot: (snapshotId: string): boolean => {
       const state = get();
-      const exists = state.snapshots.some(s => s.snapshotId === snapshotId);
+      const snapshot = state.snapshots.find(s => s.snapshotId === snapshotId);
 
-      if (!exists) {
+      if (!snapshot) {
         set({ errorMessage: '快照不存在' });
         return false;
       }
@@ -775,6 +875,7 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
         snapshots: state.snapshots.filter(s => s.snapshotId !== snapshotId),
       });
       saveSnapshotsToStorage();
+      addSnapshotLog('delete', [snapshot.snapshotId], [snapshot.name]);
       return true;
     },
 
@@ -805,67 +906,390 @@ export const useReplayStore = create<ReplayState & ReplayActions>((set, get) => 
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
+      addSnapshotLog('export', [snapshot.snapshotId], [snapshot.name]);
       return json;
     },
 
-    importSnapshot: (jsonString: string): ImportResult => {
+    importSnapshot: (jsonString: string, conflictStrategy: ImportConflictStrategy = 'keep_both'): ImportResult => {
+      return get().importSnapshots(jsonString, conflictStrategy);
+    },
+
+    renameSnapshot: (snapshotId: string, newName: string): { success: boolean; error?: string } => {
+      if (!newName || !newName.trim()) {
+        return { success: false, error: '快照名称不能为空' };
+      }
+      const trimmedName = newName.trim();
+      const state = get();
+      const snapshot = state.snapshots.find(s => s.snapshotId === snapshotId);
+
+      if (!snapshot) {
+        return { success: false, error: '快照不存在' };
+      }
+
+      if (snapshot.name === trimmedName) {
+        return { success: true };
+      }
+
+      const conflict = state.snapshots.find(s => s.name === trimmedName && s.snapshotId !== snapshotId);
+      if (conflict) {
+        return { success: false, error: `已存在名为"${trimmedName}"的快照` };
+      }
+
+      const oldName = snapshot.name;
+      const newSnapshots = state.snapshots.map(s =>
+        s.snapshotId === snapshotId ? { ...s, name: trimmedName } : s,
+      );
+
+      set({ snapshots: newSnapshots });
+      saveSnapshotsToStorage();
+      addSnapshotLog('rename', [snapshotId], [`${oldName} → ${trimmedName}`]);
+
+      return { success: true };
+    },
+
+    updateSnapshotDescription: (snapshotId: string, description: string): { success: boolean; error?: string } => {
+      const state = get();
+      const snapshot = state.snapshots.find(s => s.snapshotId === snapshotId);
+
+      if (!snapshot) {
+        return { success: false, error: '快照不存在' };
+      }
+
+      const newSnapshots = state.snapshots.map(s =>
+        s.snapshotId === snapshotId ? { ...s, description: description.trim() || undefined } : s,
+      );
+
+      set({ snapshots: newSnapshots });
+      saveSnapshotsToStorage();
+      addSnapshotLog('update', [snapshotId], [snapshot.name], description.trim() || '(清除备注)');
+
+      return { success: true };
+    },
+
+    batchRenameSnapshots: (snapshotIds: string[], pattern: 'prefix' | 'suffix' | 'replace', value: string, startIndex = 1): { success: boolean; updatedCount: number; errors?: string[] } => {
+      const state = get();
+      const errors: string[] = [];
+      let updatedCount = 0;
+      const usedNames = new Set(state.snapshots.filter(s => !snapshotIds.includes(s.snapshotId)).map(s => s.name));
+      const idToName: Record<string, string> = {};
+
+      for (let i = 0; i < snapshotIds.length; i++) {
+        const id = snapshotIds[i];
+        const snap = state.snapshots.find(s => s.snapshotId === id);
+        if (!snap) {
+          errors.push(`快照 ${id} 不存在`);
+          continue;
+        }
+
+        let newName: string;
+        switch (pattern) {
+          case 'prefix':
+            newName = `${value}${snap.name}`;
+            break;
+          case 'suffix':
+            newName = `${snap.name}${value}`;
+            break;
+          case 'replace':
+            newName = `${value}${startIndex + i}`;
+            break;
+        }
+
+        let finalName = newName;
+        let counter = 1;
+        while (usedNames.has(finalName)) {
+          finalName = `${newName}(${counter})`;
+          counter++;
+        }
+        usedNames.add(finalName);
+        idToName[id] = finalName;
+      }
+
+      const newSnapshots = state.snapshots.map(s => {
+        if (idToName[s.snapshotId]) {
+          updatedCount++;
+          return { ...s, name: idToName[s.snapshotId] };
+        }
+        return s;
+      });
+
+      set({ snapshots: newSnapshots });
+      saveSnapshotsToStorage();
+
+      if (updatedCount > 0) {
+        const renamedPairs = snapshotIds
+          .map(id => {
+            const old = state.snapshots.find(s => s.snapshotId === id);
+            const newName = idToName[id];
+            return old && newName ? `${old.name}→${newName}` : null;
+          })
+          .filter((x): x is string => !!x);
+        addSnapshotLog('batch_rename', snapshotIds, renamedPairs);
+      }
+
+      return { success: errors.length === 0, updatedCount, errors: errors.length > 0 ? errors : undefined };
+    },
+
+    batchUpdateSnapshotsDescription: (snapshotIds: string[], description: string, mode: 'replace' | 'append' | 'prepend' = 'replace'): { success: boolean; updatedCount: number } => {
+      const state = get();
+      let updatedCount = 0;
+      const trimmedDesc = description.trim();
+
+      const newSnapshots = state.snapshots.map(s => {
+        if (!snapshotIds.includes(s.snapshotId)) return s;
+        updatedCount++;
+
+        let newDesc: string | undefined;
+        switch (mode) {
+          case 'replace':
+            newDesc = trimmedDesc || undefined;
+            break;
+          case 'append':
+            newDesc = s.description ? `${s.description} ${trimmedDesc}` : trimmedDesc;
+            newDesc = newDesc || undefined;
+            break;
+          case 'prepend':
+            newDesc = s.description ? `${trimmedDesc} ${s.description}` : trimmedDesc;
+            newDesc = newDesc || undefined;
+            break;
+        }
+        return { ...s, description: newDesc };
+      });
+
+      set({ snapshots: newSnapshots });
+      saveSnapshotsToStorage();
+
+      if (updatedCount > 0) {
+        const names = snapshotIds
+          .map(id => state.snapshots.find(s => s.snapshotId === id)?.name)
+          .filter((x): x is string => !!x);
+        addSnapshotLog('update', snapshotIds, names, `批量更新备注(${mode}): ${trimmedDesc}`);
+      }
+
+      return { success: true, updatedCount };
+    },
+
+    batchDeleteSnapshots: (snapshotIds: string[]): { success: boolean; deletedCount: number } => {
+      const state = get();
+      const toDelete = state.snapshots.filter(s => snapshotIds.includes(s.snapshotId));
+      const deletedIds = toDelete.map(s => s.snapshotId);
+      const deletedNames = toDelete.map(s => s.name);
+
+      set({
+        snapshots: state.snapshots.filter(s => !snapshotIds.includes(s.snapshotId)),
+      });
+      saveSnapshotsToStorage();
+
+      if (deletedIds.length > 0) {
+        addSnapshotLog('batch_delete', deletedIds, deletedNames);
+      }
+
+      return { success: true, deletedCount: deletedIds.length };
+    },
+
+    batchExportSnapshots: (snapshotIds: string[]): string => {
+      const state = get();
+      const toExport = state.snapshots.filter(s => snapshotIds.includes(s.snapshotId));
+
+      if (toExport.length === 0) {
+        set({ errorMessage: '没有可导出的快照' });
+        return '';
+      }
+
+      const exportData: ExportedSnapshotBatch = {
+        schemaVersion: BATCH_EXPORT_SCHEMA_VERSION,
+        exportTime: Date.now(),
+        exportedBy: state.operator,
+        count: toExport.length,
+        snapshots: JSON.parse(JSON.stringify(toExport)),
+      };
+
+      const json = JSON.stringify(exportData, null, 2);
+
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `snapshots-batch-${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      addSnapshotLog('batch_export', toExport.map(s => s.snapshotId), toExport.map(s => s.name));
+      return json;
+    },
+
+    filterSnapshots: (keyword: string): Snapshot[] => {
+      const state = get();
+      const kw = keyword.trim().toLowerCase();
+      if (!kw) return state.snapshots;
+      return state.snapshots.filter(s =>
+        s.name.toLowerCase().includes(kw) ||
+        (s.description?.toLowerCase().includes(kw)) ||
+        s.operator.toLowerCase().includes(kw),
+      );
+    },
+
+    sortSnapshots: (snapshots: Snapshot[], order: SnapshotSortOrder): Snapshot[] => {
+      const sorted = [...snapshots];
+      switch (order) {
+        case 'newest_first':
+          sorted.sort((a, b) => b.createdAt - a.createdAt);
+          break;
+        case 'oldest_first':
+          sorted.sort((a, b) => a.createdAt - b.createdAt);
+          break;
+        case 'name_asc':
+          sorted.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+          break;
+        case 'name_desc':
+          sorted.sort((a, b) => b.name.localeCompare(a.name, 'zh-CN'));
+          break;
+      }
+      return sorted;
+    },
+
+    checkImportConflicts: (jsonString: string): { success: boolean; hasConflict: boolean; conflictingNames?: string[]; snapshotsToImport?: Snapshot[]; error?: string } => {
       try {
         const data = JSON.parse(jsonString);
 
         if (!data || typeof data !== 'object') {
-          return { success: false, error: '无效的JSON格式' };
+          return { success: false, hasConflict: false, error: '无效的JSON格式' };
         }
 
-        if (data.schemaVersion !== SNAPSHOT_SCHEMA_VERSION) {
-          return {
-            success: false,
-            error: `不兼容的快照版本：期望 v${SNAPSHOT_SCHEMA_VERSION}，实际 v${data.schemaVersion}`,
-          };
-        }
+        let snapshotsToImport: Snapshot[] = [];
 
-        if (!data.snapshot || typeof data.snapshot !== 'object') {
-          return { success: false, error: '快照数据缺失或损坏' };
-        }
-
-        const snap = data.snapshot;
-        const requiredFields = [
-          'snapshotId', 'name', 'createdAt', 'cursor', 'currentEventIndex',
-          'events', 'activeAlarms', 'processedEvents', 'pendingEvents',
-          'confirmations', 'rules', 'operator', 'startTime', 'endTime',
-        ];
-
-        for (const field of requiredFields) {
-          if (!(field in snap)) {
-            return { success: false, error: `快照字段缺失: ${field}` };
+        if ('count' in data && Array.isArray(data.snapshots)) {
+          if (data.schemaVersion !== BATCH_EXPORT_SCHEMA_VERSION) {
+            return { success: false, hasConflict: false, error: `不兼容的批量快照版本：期望 v${BATCH_EXPORT_SCHEMA_VERSION}` };
           }
+          for (const snap of data.snapshots) {
+            const validation = validateSnapshot(snap);
+            if (!validation.valid) {
+              return { success: false, hasConflict: false, error: `批量快照中存在损坏数据：${validation.error}` };
+            }
+          }
+          snapshotsToImport = data.snapshots;
+        } else {
+          if (data.schemaVersion !== SNAPSHOT_SCHEMA_VERSION) {
+            return { success: false, hasConflict: false, error: `不兼容的快照版本：期望 v${SNAPSHOT_SCHEMA_VERSION}，实际 v${data.schemaVersion}` };
+          }
+          if (!data.snapshot) {
+            return { success: false, hasConflict: false, error: '快照数据缺失或损坏' };
+          }
+          const validation = validateSnapshot(data.snapshot);
+          if (!validation.valid) {
+            return { success: false, hasConflict: false, error: validation.error };
+          }
+          snapshotsToImport = [data.snapshot];
         }
-
-        if (!Array.isArray(snap.events) || snap.events.length === 0) {
-          return { success: false, error: '快照事件数据无效' };
-        }
-
-        const importedSnapshot: Snapshot = {
-          ...snap,
-          snapshotId: generateId(),
-          createdAt: Date.now(),
-        };
 
         const state = get();
-        const conflict = state.snapshots.find(s => s.name === importedSnapshot.name);
-        if (conflict) {
-          importedSnapshot.name = `${importedSnapshot.name} (导入于 ${new Date().toLocaleString()})`;
-        }
+        const existingNames = new Set(state.snapshots.map(s => s.name));
+        const conflictingNames = snapshotsToImport
+          .map(s => s.name)
+          .filter(name => existingNames.has(name));
 
-        set({
-          snapshots: [...state.snapshots, importedSnapshot],
-          errorMessage: '',
-        });
-        saveSnapshotsToStorage();
-
-        return { success: true, snapshot: importedSnapshot };
+        return {
+          success: true,
+          hasConflict: conflictingNames.length > 0,
+          conflictingNames: conflictingNames.length > 0 ? conflictingNames : undefined,
+          snapshotsToImport,
+        };
       } catch (e) {
-        return { success: false, error: `解析失败: ${(e as Error).message}` };
+        return { success: false, hasConflict: false, error: `解析失败: ${(e as Error).message}` };
       }
+    },
+
+    importSnapshots: (jsonString: string, conflictStrategy: ImportConflictStrategy): ImportResult => {
+      const checkResult = get().checkImportConflicts(jsonString);
+
+      if (!checkResult.success) {
+        return { success: false, error: checkResult.error };
+      }
+
+      if (checkResult.hasConflict && conflictStrategy === 'cancel') {
+        return {
+          success: false,
+          hasConflict: true,
+          conflictingNames: checkResult.conflictingNames,
+          error: '用户取消了导入',
+        };
+      }
+
+      const state = get();
+      const existingSnapshots = [...state.snapshots];
+      const existingNames = new Map(existingSnapshots.map(s => [s.name, s]));
+      const importedSnapshots: Snapshot[] = [];
+      let skippedCount = 0;
+
+      for (const rawSnap of checkResult.snapshotsToImport || []) {
+        let snap: Snapshot = {
+          ...rawSnap,
+          snapshotId: generateId(),
+          createdAt: rawSnap.createdAt || Date.now(),
+        };
+
+        const existing = existingNames.get(snap.name);
+
+        if (existing) {
+          if (conflictStrategy === 'overwrite') {
+            const idx = existingSnapshots.findIndex(s => s.snapshotId === existing.snapshotId);
+            if (idx !== -1) {
+              existingSnapshots[idx] = { ...snap, snapshotId: existing.snapshotId };
+            }
+            importedSnapshots.push(existingSnapshots[idx]);
+            existingNames.set(snap.name, existingSnapshots[idx]);
+          } else if (conflictStrategy === 'keep_both') {
+            let counter = 1;
+            let newName = `${snap.name} (导入${counter})`;
+            while (existingNames.has(newName)) {
+              counter++;
+              newName = `${snap.name} (导入${counter})`;
+            }
+            snap = { ...snap, name: newName };
+            existingSnapshots.push(snap);
+            importedSnapshots.push(snap);
+            existingNames.set(newName, snap);
+          } else {
+            skippedCount++;
+          }
+        } else {
+          existingSnapshots.push(snap);
+          importedSnapshots.push(snap);
+          existingNames.set(snap.name, snap);
+        }
+      }
+
+      set({
+        snapshots: existingSnapshots,
+        errorMessage: '',
+      });
+      saveSnapshotsToStorage();
+
+      if (importedSnapshots.length > 0) {
+        addSnapshotLog(
+          'import',
+          importedSnapshots.map(s => s.snapshotId),
+          importedSnapshots.map(s => s.name),
+          conflictStrategy === 'overwrite' ? '覆盖模式' : conflictStrategy === 'keep_both' ? '保留两份模式' : undefined,
+        );
+      }
+
+      return {
+        success: importedSnapshots.length > 0,
+        snapshots: importedSnapshots,
+        snapshot: importedSnapshots[0],
+        importedCount: importedSnapshots.length,
+        skippedCount,
+        hasConflict: checkResult.hasConflict,
+        conflictingNames: checkResult.conflictingNames,
+      };
+    },
+
+    clearSnapshotLogs: () => {
+      set({ snapshotLogs: [] });
+      saveLogsToStorage();
     },
   };
 });

@@ -62,28 +62,6 @@ export interface ProcessResult {
   message?: string;
 }
 
-export interface ReplayState {
-  isPlaying: boolean;
-  speed: number;
-  cursor: number;
-  startTime: number;
-  endTime: number;
-  progress: number;
-  activeAlarms: Alarm[];
-  pendingEvents: Event[];
-  processedEvents: Event[];
-  currentEventIndex: number;
-  events: Event[];
-  rules: Rule[];
-  confirmations: Confirmation[];
-  operator: string;
-  operatorNotes: string;
-  lastExport: string;
-  errorMessage: string;
-  snapshots: Snapshot[];
-  preRestoreSnapshot: Snapshot | null;
-}
-
 export interface ExportedTimeline {
   exportTime: number;
   replayCursor: number;
@@ -127,8 +105,60 @@ export interface SnapshotConflictResult {
   existingSnapshot?: Snapshot;
 }
 
+export type SnapshotLogAction = 'create' | 'update' | 'delete' | 'restore' | 'undo_restore' | 'export' | 'import' | 'rename' | 'batch_rename' | 'batch_export' | 'batch_delete';
+
+export interface SnapshotOperationLog {
+  logId: string;
+  action: SnapshotLogAction;
+  timestamp: number;
+  snapshotIds: string[];
+  snapshotNames: string[];
+  operator: string;
+  detail?: string;
+}
+
+export type ImportConflictStrategy = 'overwrite' | 'keep_both' | 'cancel';
+
 export interface ImportResult {
   success: boolean;
   snapshot?: Snapshot;
+  snapshots?: Snapshot[];
   error?: string;
+  hasConflict?: boolean;
+  conflictingNames?: string[];
+  importedCount?: number;
+  skippedCount?: number;
+}
+
+export interface ExportedSnapshotBatch {
+  schemaVersion: number;
+  exportTime: number;
+  exportedBy: string;
+  count: number;
+  snapshots: Snapshot[];
+}
+
+export type SnapshotSortOrder = 'newest_first' | 'oldest_first' | 'name_asc' | 'name_desc';
+
+export interface ReplayState {
+  isPlaying: boolean;
+  speed: number;
+  cursor: number;
+  startTime: number;
+  endTime: number;
+  progress: number;
+  activeAlarms: Alarm[];
+  pendingEvents: Event[];
+  processedEvents: Event[];
+  currentEventIndex: number;
+  events: Event[];
+  rules: Rule[];
+  confirmations: Confirmation[];
+  operator: string;
+  operatorNotes: string;
+  lastExport: string;
+  errorMessage: string;
+  snapshots: Snapshot[];
+  preRestoreSnapshot: Snapshot | null;
+  snapshotLogs: SnapshotOperationLog[];
 }
